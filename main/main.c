@@ -15,14 +15,8 @@
 
 static const char *TAG = "led-wamr";
 
-// Simple WebAssembly module in bytecode format (hello world example)
-// This is a minimal WASM module that exports a simple function
-static const unsigned char test_wasm[] = {
-    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x07, 0x01, 0x60, 
-    0x02, 0x7f, 0x7f, 0x01, 0x7f, 0x03, 0x02, 0x01, 0x00, 0x07, 0x07, 0x01, 
-    0x03, 0x61, 0x64, 0x64, 0x00, 0x00, 0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 
-    0x00, 0x20, 0x01, 0x6a, 0x0b
-};
+// Include the generated WASM bytecode  
+#include "../led_controller_wasm.h"
 
 // Native function to control LED
 static int32_t native_led_control(wasm_exec_env_t exec_env, int32_t state)
@@ -44,47 +38,6 @@ static NativeSymbol native_symbols[] = {
     {"get_tick", native_get_tick, "()i", NULL}
 };
 
-static void app_instance_main(wasm_module_inst_t module_inst)
-{
-    const char *exception;
-    wasm_function_inst_t func;
-    wasm_exec_env_t exec_env;
-    uint32_t argv[2];
-    uint32_t argc = 2;
-
-    ESP_LOGI(TAG, "Looking for 'add' function in WASM module");
-    
-    // Create execution environment
-    if (!(exec_env = wasm_runtime_create_exec_env(module_inst, 8192))) {
-        ESP_LOGE(TAG, "Failed to create execution environment");
-        return;
-    }
-    
-    // Look for exported 'add' function
-    if ((func = wasm_runtime_lookup_function(module_inst, "add"))) {
-        ESP_LOGI(TAG, "Found 'add' function, calling it with args (5, 3)");
-        
-        // Set up arguments
-        argv[0] = 5;
-        argv[1] = 3;
-        
-        // Call the WASM function
-        if (wasm_runtime_call_wasm(exec_env, func, argc, argv)) {
-            ESP_LOGI(TAG, "WASM add(5, 3) = %d", argv[0]);
-        } else {
-            ESP_LOGE(TAG, "Failed to call WASM function");
-        }
-    } else {
-        ESP_LOGW(TAG, "'add' function not found in WASM module");
-    }
-
-    if ((exception = wasm_runtime_get_exception(module_inst))) {
-        ESP_LOGE(TAG, "Exception: %s", exception);
-    }
-    
-    // Destroy execution environment
-    wasm_runtime_destroy_exec_env(exec_env);
-}
 
 void iwasm_main(void *arg)
 {
@@ -130,13 +83,14 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Loading WASM module");
     
     // Copy WASM data from flash to RAM to avoid memory access issues
-    wasm_file_buf_size = sizeof(test_wasm);
+    wasm_file_buf_size = led_controller_wasm_len;
     wasm_file_buf = (uint8_t *)malloc(wasm_file_buf_size);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM module");
         goto fail1;
     }
-    memcpy(wasm_file_buf, test_wasm, wasm_file_buf_size);
+    memcpy(wasm_file_buf, led_controller_wasm, wasm_file_buf_size);
+    ESP_LOGI(TAG, "WASM module size: %d bytes", wasm_file_buf_size);
 
     if (!(wasm_module = wasm_runtime_load(wasm_file_buf, wasm_file_buf_size,
                                           error_buf, sizeof(error_buf)))) {
@@ -145,18 +99,36 @@ void iwasm_main(void *arg)
     }
 
     ESP_LOGI(TAG, "Instantiating WASM runtime");
+    ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
-                                                     32 * 1024, // stack size
-                                                     32 * 1024, // heap size
+                                                     8192,      // stack size
+                                                     8192,      // heap size
                                                      error_buf, sizeof(error_buf)))) {
         ESP_LOGE(TAG, "Error while instantiating: %s", error_buf);
         goto fail2;
     }
+    
+    ESP_LOGI(TAG, "WASM module instantiated successfully");
+    ESP_LOGI(TAG, "Free heap after instantiate: %ld bytes", esp_get_free_heap_size());
 
-    // Create execution environment
-    if (!(exec_env = wasm_runtime_create_exec_env(wasm_module_inst, 8192))) {
-        ESP_LOGE(TAG, "Failed to create execution environment");
-        goto fail3;
+    // Try creating execution environment with different stack sizes
+    uint32_t stack_sizes[] = {512, 1024, 2048, 4096, 8192};
+    int stack_size_count = sizeof(stack_sizes) / sizeof(stack_sizes[0]);
+    
+    for (int i = 0; i < stack_size_count; i++) {
+        ESP_LOGI(TAG, "Trying exec env with stack size: %ld bytes", stack_sizes[i]);
+        if ((exec_env = wasm_runtime_create_exec_env(wasm_module_inst, stack_sizes[i]))) {
+            ESP_LOGI(TAG, "✅ Successfully created exec env with %ld bytes stack", stack_sizes[i]);
+            break;
+        }
+        ESP_LOGW(TAG, "Failed with stack size %ld, trying next...", stack_sizes[i]);
+    }
+    
+    if (!exec_env) {
+        ESP_LOGW(TAG, "Failed to create execution environment with any stack size");
+        ESP_LOGW(TAG, "Will continue with WASM loaded but cannot execute functions");
+        ESP_LOGW(TAG, "Free heap: %ld bytes", esp_get_free_heap_size());
+        // Continue execution but WASM functions won't work
     }
 
     ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
@@ -188,21 +160,50 @@ main_loop:
         led_state = !led_state;
         
         if (wasm_available) {
-            // Try to call WASM function if available
-            wasm_function_inst_t led_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control");
-            if (led_func) {
-                uint32_t argv[1] = {led_state ? 1 : 0};
-                if (wasm_runtime_call_wasm(exec_env, led_func, 1, argv)) {
-                    ESP_LOGI(TAG, "🟢 WASM LED %s (count: %d)", led_state ? "ON" : "OFF", count++);
+            if (exec_env) {
+                // Try to call the WASM LED control function
+                wasm_function_inst_t led_task_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control_task");
+                if (led_task_func) {
+                    // Call WASM LED control task (no arguments)
+                    if (wasm_runtime_call_wasm(exec_env, led_task_func, 0, NULL)) {
+                        ESP_LOGI(TAG, "🟢 WASM LED control executed (count: %d)", count++);
+                    } else {
+                        ESP_LOGE(TAG, "🔴 WASM LED control failed, using fallback");
+                        gpio_set_level(LED_GPIO, led_state);
+                        count++;
+                    }
                 } else {
-                    ESP_LOGE(TAG, "Failed to call WASM function, falling back");
-                    gpio_set_level(LED_GPIO, led_state);
-                    ESP_LOGI(TAG, "🔵 Direct LED %s (count: %d)", led_state ? "ON" : "OFF", count++);
+                    // Fallback to testing add function if led_control_task not found
+                    wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
+                    if (add_func) {
+                        uint32_t argv[2] = {count, 1};
+                        if (wasm_runtime_call_wasm(exec_env, add_func, 2, argv)) {
+                            count = argv[0];  // Get result
+                            ESP_LOGI(TAG, "🔵 WASM add result: %d, direct LED %s", count, led_state ? "ON" : "OFF");
+                            gpio_set_level(LED_GPIO, led_state);
+                        } else {
+                            count++;
+                            ESP_LOGE(TAG, "WASM add failed");
+                        }
+                    } else {
+                        count++;
+                        ESP_LOGI(TAG, "🔴 No WASM functions found, direct LED %s (count: %d)", led_state ? "ON" : "OFF", count);
+                        gpio_set_level(LED_GPIO, led_state);
+                    }
                 }
             } else {
-                // No led_control function in WASM, use direct control
+                // WASM module loaded but no execution environment
+                // Just show that we have the module loaded and use direct control
+                wasm_function_inst_t led_task_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control_task");
+                wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
+                
+                ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), has led_control_task: %s, has add: %s, direct LED %s (count: %d)", 
+                         led_controller_wasm_len,
+                         led_task_func ? "YES" : "NO",
+                         add_func ? "YES" : "NO",
+                         led_state ? "ON" : "OFF", 
+                         count++);
                 gpio_set_level(LED_GPIO, led_state);
-                ESP_LOGI(TAG, "🔵 Direct LED %s (count: %d) - no WASM led_control", led_state ? "ON" : "OFF", count++);
             }
         } else {
             // Direct GPIO control fallback
@@ -216,8 +217,6 @@ main_loop:
     // Cleanup (only reached if loop is broken)
     ESP_LOGI(TAG, "Deinitializing WASM runtime");
     if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
-    
-fail3:
     if (wasm_module_inst) wasm_runtime_deinstantiate(wasm_module_inst);
     
 fail2:
