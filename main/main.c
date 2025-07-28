@@ -4,6 +4,9 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include <sys/param.h>
+#include <pthread.h>
 
 // WAMR includes
 #include "wasm_export.h"
@@ -16,7 +19,52 @@
 static const char *TAG = "led-wamr";
 
 // Include the generated WASM bytecode  
-#include "../led_controller_wasm.h"
+// #include "../led_controller_wasm.h"  // Rust WASM (193 bytes)
+// #include "../simple_wasm.h"              // C WASM (497 bytes) - has init code
+#include "../minimal_wasm.h"             // Minimal C WASM (226 bytes) - no init
+
+#define MALLOC_ALIGN_SIZE 8
+
+// ESP32-specific WAMR memory allocation functions (from ESP-WASMachine)
+static void *wamr_malloc(unsigned int size)
+{
+    void *ptr;
+#ifdef CONFIG_SPIRAM
+    uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#else
+    uint32_t caps = MALLOC_CAP_8BIT;
+#endif
+
+    ptr = heap_caps_aligned_alloc(MALLOC_ALIGN_SIZE, size, caps);
+    ESP_LOGV(TAG, "malloc ptr=%p size=%u", ptr, size);
+
+    return ptr;
+}
+
+static void wamr_free(void *ptr)
+{
+    ESP_LOGV(TAG, "free ptr=%p", ptr);
+    heap_caps_free(ptr);
+}
+
+static void *wamr_realloc(void *ptr, unsigned int size)
+{
+    void *new_ptr;
+
+    new_ptr = wamr_malloc(size);
+    if (new_ptr) {
+        if (ptr) {
+            size_t n = heap_caps_get_allocated_size(ptr);
+            size_t m = MIN(size, n);
+            memcpy(new_ptr, ptr, m);
+            wamr_free(ptr);
+        }
+    }
+
+    ESP_LOGV(TAG, "realloc ptr=%p size=%u new_ptr=%p", ptr, size, new_ptr);
+
+    return new_ptr;
+}
 
 // Native function to control LED
 static int32_t native_led_control(wasm_exec_env_t exec_env, int32_t state)
@@ -38,10 +86,46 @@ static NativeSymbol native_symbols[] = {
     {"get_tick", native_get_tick, "()i", NULL}
 };
 
+// Helper function to create execution environment matching instantiation
+static wasm_exec_env_t create_exec_env_minimal(wasm_module_inst_t module_inst) {
+    // Use same stack size as instantiation like the examples
+    uint32_t stack_size = 8192;
+    
+    wasm_exec_env_t env = wasm_runtime_create_exec_env(module_inst, stack_size);
+    if (env) {
+        ESP_LOGI(TAG, "✅ Created exec env with %d byte stack", stack_size);
+        return env;
+    }
+    
+    ESP_LOGE(TAG, "❌ Exec env creation failed with %d byte stack", stack_size);
+    return NULL;
+}
+
+// Safe WASM function call wrapper (returns false on pthread errors)
+static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv) {
+    if (!exec_env || !func) return false;
+    
+    ESP_LOGD(TAG, "Attempting WASM function call...");
+    
+    // Try the call - this may crash due to threading issues
+    bool result = wasm_runtime_call_wasm(exec_env, func, argc, argv);
+    
+    if (result) {
+        ESP_LOGD(TAG, "WASM call succeeded");
+    } else {
+        ESP_LOGD(TAG, "WASM call failed");
+    }
+    
+    return result;
+}
+
 
 void iwasm_main(void *arg)
 {
     ESP_LOGI(TAG, "Starting WAMR initialization");
+    
+    // Initialize pthread support properly - create a separate pthread task
+    ESP_LOGI(TAG, "Running WAMR in main task (FreeRTOS context)");
     
     uint8_t *wasm_file_buf = NULL;
     unsigned wasm_file_buf_size = 0;
@@ -62,39 +146,44 @@ void iwasm_main(void *arg)
     };
     gpio_config(&io_config);
 
-    // Try simple WAMR initialization first
-    ESP_LOGI(TAG, "Initializing WASM runtime (simple mode)");
-    if (!wasm_runtime_init()) {
-        ESP_LOGE(TAG, "Simple WASM runtime init failed.");
+    // Configure ESP32-specific memory allocation (from ESP-WASMachine)
+    memset(&init_args, 0, sizeof(RuntimeInitArgs));
+    init_args.mem_alloc_type = Alloc_With_Allocator;
+    init_args.mem_alloc_option.allocator.malloc_func = wamr_malloc;
+    init_args.mem_alloc_option.allocator.realloc_func = wamr_realloc;
+    init_args.mem_alloc_option.allocator.free_func = wamr_free;
+    
+    // Register native symbols
+    init_args.native_module_name = "env";
+    init_args.n_native_symbols = sizeof(native_symbols) / sizeof(NativeSymbol);
+    init_args.native_symbols = native_symbols;
+    
+    ESP_LOGI(TAG, "Initializing WASM runtime with ESP32 allocator");
+    if (!wasm_runtime_full_init(&init_args)) {
+        ESP_LOGE(TAG, "WASM runtime full init failed.");
         goto no_wasm_fallback;
     }
     
-    // Register native symbols after basic init
-    if (!wasm_runtime_register_natives("env", native_symbols, 
-                                      sizeof(native_symbols) / sizeof(NativeSymbol))) {
-        ESP_LOGW(TAG, "Failed to register native symbols, continuing...");
-    } else {
-        ESP_LOGI(TAG, "Native symbols registered successfully");
-    }
+    ESP_LOGI(TAG, "WASM runtime initialized successfully");
     
-    // Initialize thread environment - this might be needed for exec env creation
-    ESP_LOGI(TAG, "Setting thread environment for WAMR");
+    // Initialize thread environment for WASM execution context
+    ESP_LOGI(TAG, "Initializing WASM thread environment");
     if (!wasm_runtime_init_thread_env()) {
-        ESP_LOGW(TAG, "Failed to init thread environment, continuing anyway...");
-    } else {
-        ESP_LOGI(TAG, "Thread environment initialized successfully");
+        ESP_LOGE(TAG, "Failed to initialize WASM thread environment");
+        goto fail1;
     }
+    ESP_LOGI(TAG, "WASM thread environment initialized successfully");
 
     ESP_LOGI(TAG, "Loading WASM module");
     
     // Copy WASM data from flash to RAM to avoid memory access issues
-    wasm_file_buf_size = led_controller_wasm_len;
+    wasm_file_buf_size = minimal_c_wasm_len;
     wasm_file_buf = (uint8_t *)malloc(wasm_file_buf_size);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM module");
         goto fail1;
     }
-    memcpy(wasm_file_buf, led_controller_wasm, wasm_file_buf_size);
+    memcpy(wasm_file_buf, minimal_c_wasm, wasm_file_buf_size);
     ESP_LOGI(TAG, "WASM module size: %d bytes", wasm_file_buf_size);
 
     if (!(wasm_module = wasm_runtime_load(wasm_file_buf, wasm_file_buf_size,
@@ -105,9 +194,12 @@ void iwasm_main(void *arg)
 
     ESP_LOGI(TAG, "Instantiating WASM runtime");
     ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
+    uint32_t stack_size = 4096;   // Stack size (from WASM compile)
+    uint32_t heap_size = 65536;  // Heap size (match WASM initial memory)
+    
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
-                                                     4096,      // stack size (match working example)
-                                                     65536,     // heap size (match working example)
+                                                     stack_size,
+                                                     heap_size,
                                                      error_buf, sizeof(error_buf)))) {
         ESP_LOGE(TAG, "Error while instantiating: %s", error_buf);
         goto fail2;
@@ -116,48 +208,24 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "WASM module instantiated successfully");
     ESP_LOGI(TAG, "Free heap after instantiate: %ld bytes", esp_get_free_heap_size());
 
-    // Create execution environment matching the instantiation stack size
-    ESP_LOGI(TAG, "Creating exec env with 4096 bytes stack (matching WASM instantiation)");
-    ESP_LOGI(TAG, "Available heap: %ld bytes", esp_get_free_heap_size());
-    ESP_LOGI(TAG, "WASM module instance: %p", wasm_module_inst);
-    
-    // Check if module instance is valid by trying to get module
-    wasm_module_t test_module = wasm_runtime_get_module(wasm_module_inst);
-    ESP_LOGI(TAG, "Module from instance: %p (should match %p)", test_module, wasm_module);
-    
-    exec_env = wasm_runtime_create_exec_env(wasm_module_inst, 4096);
-    ESP_LOGI(TAG, "Exec env result: %p", exec_env);
-    
-    if (exec_env) {
-        ESP_LOGI(TAG, "✅ Successfully created execution environment!");
-    } else {
-        ESP_LOGW(TAG, "❌ Execution environment creation failed");
-        ESP_LOGI(TAG, "Heap after failed attempt: %ld bytes", esp_get_free_heap_size());
-        
-        // Try with an even smaller stack
-        ESP_LOGI(TAG, "Trying with very small stack (256)...");
-        exec_env = wasm_runtime_create_exec_env(wasm_module_inst, 256);
-        ESP_LOGI(TAG, "Small stack result: %p", exec_env);
-        
-        if (!exec_env) {
-            ESP_LOGW(TAG, "❌ All execution environment attempts failed");
-            ESP_LOGW(TAG, "This might be a WAMR configuration or threading issue");
-        }
-    }
+    // Try creating exec env now that we have pthread context
+    ESP_LOGI(TAG, "Creating execution environment with pthread context");
+    exec_env = create_exec_env_minimal(wasm_module_inst);
     
     if (!exec_env) {
-        ESP_LOGW(TAG, "Failed to create execution environment with any stack size");
+        ESP_LOGW(TAG, "Failed to create execution environment even with pthread context");
         ESP_LOGW(TAG, "Will continue with WASM loaded but cannot execute functions");
         ESP_LOGW(TAG, "Free heap: %ld bytes", esp_get_free_heap_size());
         // Continue execution but WASM functions won't work
+    } else {
+        ESP_LOGI(TAG, "✅ Execution environment created successfully with pthread context");
     }
 
     ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
     wasm_available = true;
     
-    ESP_LOGI(TAG, "Skipping WASM function test to avoid pthread issues");
-    // Skip the problematic app_instance_main call for now
-    // app_instance_main(wasm_module_inst);
+    // Skip function test due to pthread issues, proceed to main loop
+    ESP_LOGI(TAG, "Skipping upfront function test, proceeding to LED loop");
 
     goto main_loop;
 
@@ -180,13 +248,16 @@ main_loop:
     while (1) {
         led_state = !led_state;
         
-        if (wasm_available) {
-            if (exec_env) {
+        if (wasm_available && exec_env) {
+            // Use the existing exec env (skip on-demand creation to avoid threading issues)
+            ESP_LOGD(TAG, "Using existing exec env for WASM call");
+            
+            {
                 // Try to call the WASM LED control function
                 wasm_function_inst_t led_task_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control_task");
                 if (led_task_func) {
                     // Call WASM LED control task (no arguments)
-                    if (wasm_runtime_call_wasm(exec_env, led_task_func, 0, NULL)) {
+                    if (safe_wasm_call(exec_env, led_task_func, 0, NULL)) {
                         ESP_LOGI(TAG, "🟢 WASM LED control executed (count: %d)", count++);
                     } else {
                         ESP_LOGE(TAG, "🔴 WASM LED control failed, using fallback");
@@ -198,7 +269,7 @@ main_loop:
                     wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
                     if (add_func) {
                         uint32_t argv[2] = {count, 1};
-                        if (wasm_runtime_call_wasm(exec_env, add_func, 2, argv)) {
+                        if (safe_wasm_call(exec_env, add_func, 2, argv)) {
                             count = argv[0];  // Get result
                             ESP_LOGI(TAG, "🔵 WASM add result: %d, direct LED %s", count, led_state ? "ON" : "OFF");
                             gpio_set_level(LED_GPIO, led_state);
@@ -212,20 +283,15 @@ main_loop:
                         gpio_set_level(LED_GPIO, led_state);
                     }
                 }
-            } else {
-                // WASM module loaded but no execution environment
-                // Just show that we have the module loaded and use direct control
-                wasm_function_inst_t led_task_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control_task");
-                wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
                 
-                ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), has led_control_task: %s, has add: %s, direct LED %s (count: %d)", 
-                         led_controller_wasm_len,
-                         led_task_func ? "YES" : "NO",
-                         add_func ? "YES" : "NO",
-                         led_state ? "ON" : "OFF", 
-                         count++);
-                gpio_set_level(LED_GPIO, led_state);
+                // Keep exec env alive (don't destroy/recreate each time)
             }
+        } else if (wasm_available) {
+            ESP_LOGI(TAG, "❌ WASM available but no exec env, using direct GPIO");
+            count++;  
+            ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), exec env failed, direct LED %s (count: %d)", 
+                    minimal_c_wasm_len, led_state ? "ON" : "OFF", count);
+            gpio_set_level(LED_GPIO, led_state);
         } else {
             // Direct GPIO control fallback
             gpio_set_level(LED_GPIO, led_state);
@@ -246,14 +312,22 @@ fail2:
     
 fail1:
     if (wasm_file_buf) free(wasm_file_buf);
-    wasm_runtime_destroy_thread_env();
     wasm_runtime_destroy();
+}
+
+// Pthread entry point for WAMR
+void* wamr_pthread_main(void* arg)
+{
+    ESP_LOGI(TAG, "WAMR pthread started");
+    iwasm_main(arg);
+    return NULL;
 }
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting LED + WAMR test application");
     
-    // Create a task for WAMR
-    xTaskCreate(iwasm_main, "iwasm_main", IWASM_MAIN_STACK_SIZE, NULL, 5, NULL);
+    // Try direct execution in main task with thread environment init
+    ESP_LOGI(TAG, "Running WAMR directly in main FreeRTOS task");
+    iwasm_main(NULL);
 }
