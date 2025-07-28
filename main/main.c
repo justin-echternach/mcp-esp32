@@ -21,7 +21,8 @@ static const char *TAG = "led-wamr";
 // Include the generated WASM bytecode  
 // #include "../led_controller_wasm.h"  // Rust WASM (193 bytes)
 // #include "../simple_wasm.h"              // C WASM (497 bytes) - has init code
-#include "../minimal_wasm.h"             // Minimal C WASM (226 bytes) - no init
+// #include "../minimal_wasm.h"             // Minimal C WASM (93 bytes) - no init
+#include "../led_wasm.h"                 // LED control WASM (218 bytes) - LED functions
 
 #define MALLOC_ALIGN_SIZE 8
 
@@ -172,13 +173,13 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Loading WASM module");
     
     // Copy WASM data from flash to RAM to avoid memory access issues
-    wasm_file_buf_size = minimal_c_wasm_len;
+    wasm_file_buf_size = led_c_wasm_len;
     wasm_file_buf = (uint8_t *)malloc(wasm_file_buf_size);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM module");
         goto fail1;
     }
-    memcpy(wasm_file_buf, minimal_c_wasm, wasm_file_buf_size);
+    memcpy(wasm_file_buf, led_c_wasm, wasm_file_buf_size);
     ESP_LOGI(TAG, "WASM module size: %d bytes", wasm_file_buf_size);
 
     if (!(wasm_module = wasm_runtime_load(wasm_file_buf, wasm_file_buf_size,
@@ -190,7 +191,7 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Instantiating WASM runtime");
     ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
     uint32_t stack_size = 4096;   // Stack size (from WASM compile)  
-    uint32_t heap_size = 32768;  // Try smaller heap size in pthread context
+    uint32_t heap_size = 32768;  // Smaller heap size for pthread context
     
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
                                                      stack_size,
@@ -219,19 +220,30 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
     wasm_available = true;
     
-    // Test WASM function execution in pthread context
+    // Test WASM LED function execution in pthread context
     if (exec_env) {
-        ESP_LOGI(TAG, "Testing WASM function execution in pthread context...");
-        wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
-        if (add_func) {
-            uint32_t argv[2] = {5, 3};
-            if (safe_wasm_call(exec_env, add_func, 2, argv)) {
-                ESP_LOGI(TAG, "✅ WASM add(5,3) = %d", argv[0]);
+        ESP_LOGI(TAG, "Testing WASM LED functions in pthread context...");
+        
+        // Test LED on function
+        wasm_function_inst_t led_on_func = wasm_runtime_lookup_function(wasm_module_inst, "led_on");
+        if (led_on_func) {
+            if (safe_wasm_call(exec_env, led_on_func, 0, NULL)) {
+                ESP_LOGI(TAG, "✅ WASM led_on() executed - LED should be ON");
+                vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED on for 500ms
             } else {
-                ESP_LOGE(TAG, "❌ WASM add function call failed");
+                ESP_LOGE(TAG, "❌ WASM led_on function call failed");
             }
-        } else {
-            ESP_LOGE(TAG, "❌ WASM add function not found");
+        }
+        
+        // Test LED off function
+        wasm_function_inst_t led_off_func = wasm_runtime_lookup_function(wasm_module_inst, "led_off");
+        if (led_off_func) {
+            if (safe_wasm_call(exec_env, led_off_func, 0, NULL)) {
+                ESP_LOGI(TAG, "✅ WASM led_off() executed - LED should be OFF");
+                vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED off for 500ms
+            } else {
+                ESP_LOGE(TAG, "❌ WASM led_off function call failed");
+            }
         }
     }
 
@@ -257,48 +269,49 @@ main_loop:
         led_state = !led_state;
         
         if (wasm_available && exec_env) {
-            // Use the existing exec env (skip on-demand creation to avoid threading issues)
-            ESP_LOGD(TAG, "Using existing exec env for WASM call");
+            // Use WASM to control LED directly!
+            ESP_LOGD(TAG, "Using WASM LED control functions");
             
-            {
-                // Try to call the WASM LED control function
-                wasm_function_inst_t led_task_func = wasm_runtime_lookup_function(wasm_module_inst, "led_control_task");
-                if (led_task_func) {
-                    // Call WASM LED control task (no arguments)
-                    if (safe_wasm_call(exec_env, led_task_func, 0, NULL)) {
-                        ESP_LOGI(TAG, "🟢 WASM LED control executed (count: %d)", count++);
+            // Try to call the WASM LED toggle function
+            wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(wasm_module_inst, "led_toggle");
+            if (led_toggle_func) {
+                uint32_t argv[1] = {count};
+                if (safe_wasm_call(exec_env, led_toggle_func, 1, argv)) {
+                    int led_result = argv[0];
+                    ESP_LOGI(TAG, "🟢 WASM LED toggle executed! LED %s (count: %d)", 
+                            led_result ? "ON" : "OFF", count++);
+                } else {
+                    ESP_LOGE(TAG, "🔴 WASM LED toggle failed, using fallback");
+                    gpio_set_level(LED_GPIO, led_state);
+                    count++;
+                }
+            } else {
+                // Fallback to basic LED on/off functions
+                wasm_function_inst_t led_func = led_state ? 
+                    wasm_runtime_lookup_function(wasm_module_inst, "led_on") :
+                    wasm_runtime_lookup_function(wasm_module_inst, "led_off");
+                    
+                if (led_func) {
+                    if (safe_wasm_call(exec_env, led_func, 0, NULL)) {
+                        ESP_LOGI(TAG, "🟢 WASM LED %s executed (count: %d)", 
+                                led_state ? "ON" : "OFF", count++);
                     } else {
-                        ESP_LOGE(TAG, "🔴 WASM LED control failed, using fallback");
+                        ESP_LOGE(TAG, "🔴 WASM LED function failed, using fallback");
                         gpio_set_level(LED_GPIO, led_state);
                         count++;
                     }
                 } else {
-                    // Fallback to testing add function if led_control_task not found
-                    wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
-                    if (add_func) {
-                        uint32_t argv[2] = {count, 1};
-                        if (safe_wasm_call(exec_env, add_func, 2, argv)) {
-                            count = argv[0];  // Get result
-                            ESP_LOGI(TAG, "🔵 WASM add result: %d, direct LED %s", count, led_state ? "ON" : "OFF");
-                            gpio_set_level(LED_GPIO, led_state);
-                        } else {
-                            count++;
-                            ESP_LOGE(TAG, "WASM add failed");
-                        }
-                    } else {
-                        count++;
-                        ESP_LOGI(TAG, "🔴 No WASM functions found, direct LED %s (count: %d)", led_state ? "ON" : "OFF", count);
-                        gpio_set_level(LED_GPIO, led_state);
-                    }
+                    count++;
+                    ESP_LOGI(TAG, "🔴 No WASM LED functions found, direct LED %s (count: %d)", 
+                            led_state ? "ON" : "OFF", count);
+                    gpio_set_level(LED_GPIO, led_state);
                 }
-                
-                // Keep exec env alive (don't destroy/recreate each time)
             }
         } else if (wasm_available) {
             ESP_LOGI(TAG, "❌ WASM available but no exec env, using direct GPIO");
             count++;  
             ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), exec env failed, direct LED %s (count: %d)", 
-                    minimal_c_wasm_len, led_state ? "ON" : "OFF", count);
+                    led_c_wasm_len, led_state ? "ON" : "OFF", count);
             gpio_set_level(LED_GPIO, led_state);
         } else {
             // Direct GPIO control fallback
