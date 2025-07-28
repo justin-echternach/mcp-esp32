@@ -166,13 +166,8 @@ void iwasm_main(void *arg)
     
     ESP_LOGI(TAG, "WASM runtime initialized successfully");
     
-    // Initialize thread environment for WASM execution context
-    ESP_LOGI(TAG, "Initializing WASM thread environment");
-    if (!wasm_runtime_init_thread_env()) {
-        ESP_LOGE(TAG, "Failed to initialize WASM thread environment");
-        goto fail1;
-    }
-    ESP_LOGI(TAG, "WASM thread environment initialized successfully");
+    // Thread environment should be automatically handled in pthread context
+    ESP_LOGI(TAG, "Running in pthread context - thread environment should be automatic");
 
     ESP_LOGI(TAG, "Loading WASM module");
     
@@ -194,8 +189,8 @@ void iwasm_main(void *arg)
 
     ESP_LOGI(TAG, "Instantiating WASM runtime");
     ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
-    uint32_t stack_size = 4096;   // Stack size (from WASM compile)
-    uint32_t heap_size = 65536;  // Heap size (match WASM initial memory)
+    uint32_t stack_size = 4096;   // Stack size (from WASM compile)  
+    uint32_t heap_size = 32768;  // Try smaller heap size in pthread context
     
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
                                                      stack_size,
@@ -224,8 +219,21 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
     wasm_available = true;
     
-    // Skip function test due to pthread issues, proceed to main loop
-    ESP_LOGI(TAG, "Skipping upfront function test, proceeding to LED loop");
+    // Test WASM function execution in pthread context
+    if (exec_env) {
+        ESP_LOGI(TAG, "Testing WASM function execution in pthread context...");
+        wasm_function_inst_t add_func = wasm_runtime_lookup_function(wasm_module_inst, "add");
+        if (add_func) {
+            uint32_t argv[2] = {5, 3};
+            if (safe_wasm_call(exec_env, add_func, 2, argv)) {
+                ESP_LOGI(TAG, "✅ WASM add(5,3) = %d", argv[0]);
+            } else {
+                ESP_LOGE(TAG, "❌ WASM add function call failed");
+            }
+        } else {
+            ESP_LOGE(TAG, "❌ WASM add function not found");
+        }
+    }
 
     goto main_loop;
 
@@ -327,7 +335,32 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "Starting LED + WAMR test application");
     
-    // Try direct execution in main task with thread environment init
-    ESP_LOGI(TAG, "Running WAMR directly in main FreeRTOS task");
-    iwasm_main(NULL);
+    // Create pthread for ALL WAMR operations (like the reference code)
+    pthread_t wamr_thread;
+    pthread_attr_t attr;
+    
+    ESP_LOGI(TAG, "Creating pthread for WAMR (following reference pattern)...");
+    
+    if (pthread_attr_init(&attr) != 0) {
+        ESP_LOGE(TAG, "Failed to init pthread attributes");
+        return;
+    }
+    
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+    pthread_attr_setstacksize(&attr, 32768);  // Larger stack like reference
+    
+    if (pthread_create(&wamr_thread, &attr, (void *(*)(void *))iwasm_main, NULL) != 0) {
+        ESP_LOGE(TAG, "Failed to create WAMR pthread");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "WAMR pthread created, waiting for completion...");
+    
+    void* thread_result;
+    if (pthread_join(wamr_thread, &thread_result) != 0) {
+        ESP_LOGE(TAG, "Failed to join WAMR pthread");
+    }
+    
+    pthread_attr_destroy(&attr);
+    ESP_LOGI(TAG, "WAMR pthread completed");
 }
