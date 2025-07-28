@@ -62,22 +62,27 @@ void iwasm_main(void *arg)
     };
     gpio_config(&io_config);
 
-    // Configure memory allocation
-    memset(&init_args, 0, sizeof(RuntimeInitArgs));
-    init_args.mem_alloc_type = Alloc_With_Allocator;
-    init_args.mem_alloc_option.allocator.malloc_func = (void *)os_malloc;
-    init_args.mem_alloc_option.allocator.realloc_func = (void *)os_realloc;
-    init_args.mem_alloc_option.allocator.free_func = (void *)os_free;
-
-    // Register native symbols
-    init_args.native_module_name = "env";
-    init_args.n_native_symbols = sizeof(native_symbols) / sizeof(NativeSymbol);
-    init_args.native_symbols = native_symbols;
-
-    ESP_LOGI(TAG, "Initializing WASM runtime");
-    if (!wasm_runtime_full_init(&init_args)) {
-        ESP_LOGE(TAG, "Init runtime failed.");
+    // Try simple WAMR initialization first
+    ESP_LOGI(TAG, "Initializing WASM runtime (simple mode)");
+    if (!wasm_runtime_init()) {
+        ESP_LOGE(TAG, "Simple WASM runtime init failed.");
         goto no_wasm_fallback;
+    }
+    
+    // Register native symbols after basic init
+    if (!wasm_runtime_register_natives("env", native_symbols, 
+                                      sizeof(native_symbols) / sizeof(NativeSymbol))) {
+        ESP_LOGW(TAG, "Failed to register native symbols, continuing...");
+    } else {
+        ESP_LOGI(TAG, "Native symbols registered successfully");
+    }
+    
+    // Initialize thread environment - this might be needed for exec env creation
+    ESP_LOGI(TAG, "Setting thread environment for WAMR");
+    if (!wasm_runtime_init_thread_env()) {
+        ESP_LOGW(TAG, "Failed to init thread environment, continuing anyway...");
+    } else {
+        ESP_LOGI(TAG, "Thread environment initialized successfully");
     }
 
     ESP_LOGI(TAG, "Loading WASM module");
@@ -101,8 +106,8 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Instantiating WASM runtime");
     ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
-                                                     8192,      // stack size
-                                                     8192,      // heap size
+                                                     4096,      // stack size (match working example)
+                                                     65536,     // heap size (match working example)
                                                      error_buf, sizeof(error_buf)))) {
         ESP_LOGE(TAG, "Error while instantiating: %s", error_buf);
         goto fail2;
@@ -111,17 +116,33 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "WASM module instantiated successfully");
     ESP_LOGI(TAG, "Free heap after instantiate: %ld bytes", esp_get_free_heap_size());
 
-    // Try creating execution environment with different stack sizes
-    uint32_t stack_sizes[] = {512, 1024, 2048, 4096, 8192};
-    int stack_size_count = sizeof(stack_sizes) / sizeof(stack_sizes[0]);
+    // Create execution environment matching the instantiation stack size
+    ESP_LOGI(TAG, "Creating exec env with 4096 bytes stack (matching WASM instantiation)");
+    ESP_LOGI(TAG, "Available heap: %ld bytes", esp_get_free_heap_size());
+    ESP_LOGI(TAG, "WASM module instance: %p", wasm_module_inst);
     
-    for (int i = 0; i < stack_size_count; i++) {
-        ESP_LOGI(TAG, "Trying exec env with stack size: %ld bytes", stack_sizes[i]);
-        if ((exec_env = wasm_runtime_create_exec_env(wasm_module_inst, stack_sizes[i]))) {
-            ESP_LOGI(TAG, "✅ Successfully created exec env with %ld bytes stack", stack_sizes[i]);
-            break;
+    // Check if module instance is valid by trying to get module
+    wasm_module_t test_module = wasm_runtime_get_module(wasm_module_inst);
+    ESP_LOGI(TAG, "Module from instance: %p (should match %p)", test_module, wasm_module);
+    
+    exec_env = wasm_runtime_create_exec_env(wasm_module_inst, 4096);
+    ESP_LOGI(TAG, "Exec env result: %p", exec_env);
+    
+    if (exec_env) {
+        ESP_LOGI(TAG, "✅ Successfully created execution environment!");
+    } else {
+        ESP_LOGW(TAG, "❌ Execution environment creation failed");
+        ESP_LOGI(TAG, "Heap after failed attempt: %ld bytes", esp_get_free_heap_size());
+        
+        // Try with an even smaller stack
+        ESP_LOGI(TAG, "Trying with very small stack (256)...");
+        exec_env = wasm_runtime_create_exec_env(wasm_module_inst, 256);
+        ESP_LOGI(TAG, "Small stack result: %p", exec_env);
+        
+        if (!exec_env) {
+            ESP_LOGW(TAG, "❌ All execution environment attempts failed");
+            ESP_LOGW(TAG, "This might be a WAMR configuration or threading issue");
         }
-        ESP_LOGW(TAG, "Failed with stack size %ld, trying next...", stack_sizes[i]);
     }
     
     if (!exec_env) {
@@ -218,12 +239,14 @@ main_loop:
     ESP_LOGI(TAG, "Deinitializing WASM runtime");
     if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
     if (wasm_module_inst) wasm_runtime_deinstantiate(wasm_module_inst);
+    wasm_runtime_destroy_thread_env();
     
 fail2:
     if (wasm_module) wasm_runtime_unload(wasm_module);
     
 fail1:
     if (wasm_file_buf) free(wasm_file_buf);
+    wasm_runtime_destroy_thread_env();
     wasm_runtime_destroy();
 }
 

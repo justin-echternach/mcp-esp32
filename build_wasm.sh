@@ -8,8 +8,8 @@ cd wasm-led
 # Add wasm32 target if not already added
 rustup target add wasm32-unknown-unknown 2>/dev/null
 
-# Set target and build flags similar to the ESP32 example
-export RUSTFLAGS="-C link-arg=-zstack-size=4096 -C link-arg=--initial-memory=65536 -C link-arg=--export=__data_end -C link-arg=--export=__heap_base -C link-arg=--strip-all -C link-arg=--no-entry -C link-arg=--allow-undefined -C target-feature=+bulk-memory"
+# Set target and build flags to exactly match working ESP32 example
+export RUSTFLAGS="-C link-arg=-zstack-size=4096 -C link-arg=--initial-memory=65536 -C link-arg=--export=__data_end -C link-arg=--export=__heap_base -C link-arg=--strip-all -C link-arg=--no-entry -C link-arg=--allow-undefined"
 
 # Build the WASM module with optimization
 cargo build --target wasm32-unknown-unknown --release
