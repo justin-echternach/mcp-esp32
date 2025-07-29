@@ -1275,22 +1275,42 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 }
 
 // Logging Functions
-static void native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
+static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
         wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
         ESP_LOGI(tag, "[WASM] %s", message);
+        return 0;
     }
+    return -1;
 }
 
-static void native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
+static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
         wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
         ESP_LOGE(tag, "[WASM] %s", message);
+        return 0;
     }
+    return -1;
+}
+
+// String Functions (C library compatibility)
+static char* native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)dest) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)src)) {
+        return dest; // Return dest even on validation failure
+    }
+    
+    // Standard strcat implementation
+    char* d = dest;
+    while (*d) d++; // Find end of dest
+    while ((*d++ = *src++)); // Copy src to end of dest
+    return dest;
 }
 
 // Native symbol table - exports native functions to WASM
@@ -1306,8 +1326,8 @@ static NativeSymbol native_symbols[] = {
     {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
     
     // SSE Events
-    {"sse_send_event", native_sse_send_event, "(**i", NULL},
-    {"sse_send_tool_result", native_sse_send_tool_result, "(**i", NULL},
+    {"sse_send_event", native_sse_send_event, "(**)i", NULL},
+    {"sse_send_tool_result", native_sse_send_tool_result, "(**)i", NULL},
     
     // System Info
     {"get_tick_count", native_get_tick_count, "()i", NULL},
@@ -1315,13 +1335,16 @@ static NativeSymbol native_symbols[] = {
     {"get_uptime_ms", native_get_uptime_ms, "()i", NULL},
     
     // JSON Helper Functions
-    {"json_parse_request", native_json_parse_request, "(**i)i", NULL},
+    {"json_parse_request", native_json_parse_request, "(***i)i", NULL},
     {"json_create_response", native_json_create_response, "(**i)i", NULL},
     {"json_create_error", native_json_create_error, "(i**i)i", NULL},
     
     // Logging
-    {"log_info", native_log_info, "(**)v", NULL},
-    {"log_error", native_log_error, "(**)v", NULL}
+    {"log_info", native_log_info, "(**)i", NULL},
+    {"log_error", native_log_error, "(**)i", NULL},
+    
+    // String Functions (C library compatibility)  
+    {"strcat", native_strcat, "(**)i", NULL}
 };
 
 // Helper function to create execution environment matching instantiation

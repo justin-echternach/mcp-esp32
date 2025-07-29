@@ -17,20 +17,16 @@ if ! command -v "$WASI_SDK_PATH/bin/clang" &> /dev/null; then
     exit 1
 fi
 
-# Compile C to WASM with pthread support for WAMR shared memory
+# Compile C to WASM with ESP32-compatible memory settings (like working led.c)
 "$WASI_SDK_PATH/bin/clang" \
     --target=wasm32-wasi \
     -O3 \
-    -pthread \
-    -z stack-size=4096 \
+    -z stack-size=2048 \
     -Wl,--initial-memory=65536 \
-    -Wl,--max-memory=131072 \
-    -Wl,--shared-memory \
     -nostdlib \
     -Wl,--no-entry \
     -Wl,--export=handle_mcp_request \
-    -Wl,--export=__heap_base \
-    -Wl,--export=__data_end \
+    -Wl,--export=_start \
     -Wl,--strip-all \
     -Wl,--allow-undefined \
     -o wasm/led_ctrl.was \

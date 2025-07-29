@@ -54,8 +54,8 @@ extern int32_t json_create_response(const char* result, char* response, int32_t 
 extern int32_t json_create_error(int32_t code, const char* message, char* response, int32_t max_len);
 
 // Logging
-extern void log_info(const char* tag, const char* message);
-extern void log_error(const char* tag, const char* message);
+extern int32_t log_info(const char* tag, const char* message);
+extern int32_t log_error(const char* tag, const char* message);
 
 // === MCP SDK Functions ===
 // These functions are provided by the SDK
