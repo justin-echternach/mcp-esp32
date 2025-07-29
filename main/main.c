@@ -61,6 +61,11 @@ static wasm_module_inst_t g_wasm_module_inst = NULL;
 static wasm_exec_env_t g_exec_env = NULL;
 static bool g_wasm_available = false;
 
+// Global LED state for SSE integration
+static volatile bool g_led_state = false;
+static volatile bool g_led_state_changed = false;
+static SemaphoreHandle_t g_led_state_mutex = NULL;
+
 // Forward declaration for WASM functions
 static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv);
 
@@ -144,7 +149,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return httpd_resp_send(req, html, strlen(html));
 }
 
-// SSE handler for event stream - keeps connection alive
+// SSE handler for event stream - sends real-time LED status
 static esp_err_t sse_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "SSE client connecting...");
     
@@ -155,37 +160,60 @@ static esp_err_t sse_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     
     // Send initial welcome event
-    const char *welcome = "event: connected\ndata: Connected to ESP32 SSE\n\n";
+    const char *welcome = "event: connected\ndata: Connected to ESP32 LED Controller\n\n";
     if (httpd_resp_send_chunk(req, welcome, strlen(welcome)) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to send welcome SSE event");
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG, "SSE client connected, starting event stream");
+    // Send initial LED status
+    if (g_led_state_mutex) {
+        if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            char led_event[64];
+            snprintf(led_event, sizeof(led_event), 
+                    "event: led_status\ndata: %s\n\n", 
+                    g_led_state ? "ON" : "OFF");
+            httpd_resp_send_chunk(req, led_event, strlen(led_event));
+            xSemaphoreGive(g_led_state_mutex);
+        }
+    }
     
-    // Keep connection alive and send periodic events
-    int event_count = 0;
+    ESP_LOGI(TAG, "SSE client connected, streaming LED status");
+    
+    // Stream LED status changes in real-time
     while (true) {
-        // Send current LED status (we'll determine this from WASM state)
-        // For now, send a heartbeat every 5 seconds to test the connection
-        char event_msg[128];
-        snprintf(event_msg, sizeof(event_msg), 
-                "event: heartbeat\ndata: Event %d at %lu ms\n\n", 
-                event_count++, (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        bool state_changed = false;
+        bool current_state = false;
         
-        if (httpd_resp_send_chunk(req, event_msg, strlen(event_msg)) != ESP_OK) {
-            ESP_LOGW(TAG, "SSE client disconnected");
-            break;
+        // Check if LED state has changed
+        if (g_led_state_mutex) {
+            if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (g_led_state_changed) {
+                    state_changed = true;
+                    current_state = g_led_state;
+                    g_led_state_changed = false; // Reset change flag
+                }
+                xSemaphoreGive(g_led_state_mutex);
+            }
         }
         
-        // Wait 5 seconds between heartbeat events
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
-        
-        // Limit to prevent infinite loop in testing
-        if (event_count > 100) {
-            ESP_LOGI(TAG, "SSE test limit reached, closing connection");
-            break;
+        // Send LED status event if state changed
+        if (state_changed) {
+            char led_event[64];
+            snprintf(led_event, sizeof(led_event), 
+                    "event: led_status\ndata: %s\n\n", 
+                    current_state ? "ON" : "OFF");
+            
+            if (httpd_resp_send_chunk(req, led_event, strlen(led_event)) != ESP_OK) {
+                ESP_LOGW(TAG, "SSE client disconnected");
+                break;
+            }
+            
+            ESP_LOGI(TAG, "Sent LED status via SSE: %s", current_state ? "ON" : "OFF");
         }
+        
+        // Short delay to avoid busy waiting
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
     
     // Close the chunked response
@@ -354,7 +382,20 @@ static int32_t native_led_control(wasm_exec_env_t exec_env, int32_t state)
     ESP_LOGI(TAG, "WASM called native_led_control with state: %d", state);
     gpio_set_level(LED_GPIO, state ? 1 : 0);
     
-    // Send SSE event when LED state changes
+    // Update global LED state for SSE integration
+    if (g_led_state_mutex) {
+        if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            bool new_state = state ? true : false;
+            if (g_led_state != new_state) {
+                g_led_state = new_state;
+                g_led_state_changed = true;
+                ESP_LOGD(TAG, "LED state updated: %s", g_led_state ? "ON" : "OFF");
+            }
+            xSemaphoreGive(g_led_state_mutex);
+        }
+    }
+    
+    // Legacy SSE function (currently disabled)
     send_sse_event("led_status", state ? "ON" : "OFF");
     
     return state;
@@ -803,6 +844,14 @@ void* wamr_pthread_main(void* arg)
 void app_main(void)
 {
     ESP_LOGI(TAG, "Starting LED + WAMR + HTTP Server application");
+    
+    // Initialize LED state mutex for SSE integration
+    g_led_state_mutex = xSemaphoreCreateMutex();
+    if (g_led_state_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create LED state mutex");
+        return;
+    }
+    ESP_LOGI(TAG, "LED state mutex initialized");
     
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
