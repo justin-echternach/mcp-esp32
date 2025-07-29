@@ -1,0 +1,26 @@
+{
+  "gpio_protection": {
+    "protected_pins": [0, 1, 6, 7, 8, 9, 10, 11],
+    "input_only_pins": [34, 35, 36, 39],
+    "max_current_pins": [12, 13],
+    "description": "Pin 0,1=UART0, 6-11=Flash, 34-39=ADC only, 12-13=high current capable"
+  },
+  "routes": {
+    "/mcp": "default_mcp.wasm",
+    "/mcp/led": "led_controller.wasm",
+    "/mcp/gpio": "gpio_control.wasm",
+    "/mcp/system": "system_info.wasm"
+  },
+  "system": {
+    "max_wasm_modules": 4,
+    "wasm_heap_size": 32768,
+    "wasm_stack_size": 8192,
+    "sse_max_clients": 8,
+    "mcp_timeout_ms": 5000
+  },
+  "security": {
+    "require_auth": false,
+    "rate_limit_per_minute": 100,
+    "allowed_origins": ["*"]
+  }
+}

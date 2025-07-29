@@ -54,7 +54,7 @@ typedef struct {
     int fd;
     bool active;
 } sse_client_t;
-static sse_client_t sse_clients[MAX_SSE_CLIENTS] = {0};
+// static sse_client_t sse_clients[MAX_SSE_CLIENTS] = {0}; // Unused for now
 
 // Global WASM runtime variables for HTTP API access
 static wasm_module_inst_t g_wasm_module_inst = NULL;
@@ -68,6 +68,365 @@ static SemaphoreHandle_t g_led_state_mutex = NULL;
 
 // Forward declaration for WASM functions
 static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv);
+static void register_mcp_endpoints(httpd_handle_t server);
+
+// ========== MCP Config System ==========
+
+#define MAX_PROTECTED_PINS 16
+#define MAX_MCP_ROUTES 8
+#define MAX_ROUTE_LENGTH 64
+#define MAX_FILENAME_LENGTH 128
+
+typedef struct {
+    int protected_pins[MAX_PROTECTED_PINS];
+    int protected_pin_count;
+    int input_only_pins[MAX_PROTECTED_PINS];
+    int input_only_pin_count;
+    int max_current_pins[MAX_PROTECTED_PINS];
+    int max_current_pin_count;
+} gpio_protection_config_t;
+
+typedef struct {
+    char route[MAX_ROUTE_LENGTH];
+    char wasm_file[MAX_FILENAME_LENGTH];
+} mcp_route_config_t;
+
+typedef struct {
+    int max_wasm_modules;
+    int wasm_heap_size;
+    int wasm_stack_size;
+    int sse_max_clients;
+    int mcp_timeout_ms;
+} system_config_t;
+
+typedef struct {
+    gpio_protection_config_t gpio_protection;
+    mcp_route_config_t routes[MAX_MCP_ROUTES];
+    int route_count;
+    system_config_t system;
+    bool require_auth;
+    int rate_limit_per_minute;
+} mcp_config_t;
+
+// Global MCP configuration
+static mcp_config_t g_mcp_config = {0};
+static bool g_mcp_config_loaded = false;
+
+// ========== Minimal JSON Parser ==========
+
+// Find a string value in JSON by key
+static bool json_find_string(const char* json, const char* key, char* value, size_t max_len) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
+    
+    const char* key_pos = strstr(json, search_key);
+    if (!key_pos) return false;
+    
+    // Find the opening quote of the value
+    const char* value_start = strchr(key_pos + strlen(search_key), '"');
+    if (!value_start) return false;
+    value_start++; // Skip opening quote
+    
+    // Find the closing quote
+    const char* value_end = strchr(value_start, '"');
+    if (!value_end) return false;
+    
+    size_t len = value_end - value_start;
+    if (len >= max_len) len = max_len - 1;
+    
+    strncpy(value, value_start, len);
+    value[len] = '\0';
+    return true;
+}
+
+// Find an integer value in JSON by key
+static bool json_find_int(const char* json, const char* key, int* value) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
+    
+    const char* key_pos = strstr(json, search_key);
+    if (!key_pos) return false;
+    
+    // Skip to the value part
+    const char* value_start = key_pos + strlen(search_key);
+    while (*value_start == ' ' || *value_start == '\t') value_start++;
+    
+    *value = atoi(value_start);
+    return true;
+}
+
+// Find a boolean value in JSON by key
+static bool json_find_bool(const char* json, const char* key, bool* value) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
+    
+    const char* key_pos = strstr(json, search_key);
+    if (!key_pos) return false;
+    
+    const char* value_start = key_pos + strlen(search_key);
+    while (*value_start == ' ' || *value_start == '\t') value_start++;
+    
+    if (strncmp(value_start, "true", 4) == 0) {
+        *value = true;
+        return true;
+    } else if (strncmp(value_start, "false", 5) == 0) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
+// Parse JSON array of integers
+static int json_parse_int_array(const char* json, const char* key, int* array, int max_count) {
+    char search_key[128];
+    snprintf(search_key, sizeof(search_key), "\"%s\":[", key);
+    
+    const char* array_start = strstr(json, search_key);
+    if (!array_start) return 0;
+    
+    array_start += strlen(search_key);
+    const char* array_end = strchr(array_start, ']');
+    if (!array_end) return 0;
+    
+    int count = 0;
+    const char* pos = array_start;
+    
+    while (pos < array_end && count < max_count) {
+        while (*pos == ' ' || *pos == '\t' || *pos == ',') pos++;
+        if (pos >= array_end) break;
+        
+        array[count] = atoi(pos);
+        count++;
+        
+        // Find next comma or end
+        while (pos < array_end && *pos != ',' && *pos != ']') pos++;
+        if (*pos == ',') pos++;
+    }
+    
+    return count;
+}
+
+// ========== MCP Config Loader ==========
+
+// Load MCP configuration from file
+static bool load_mcp_config_from_file(const char* filepath) {
+    ESP_LOGI(TAG, "Loading MCP config from: %s", filepath);
+    
+    FILE* file = fopen(filepath, "r");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open MCP config file: %s (errno: %d - %s)", filepath, errno, strerror(errno));
+        return false;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    if (size <= 0 || size > 8192) {  // Reasonable config size limit
+        ESP_LOGE(TAG, "Invalid MCP config file size: %ld", size);
+        fclose(file);
+        return false;
+    }
+    
+    // Read entire config file
+    char* config_json = malloc(size + 1);
+    if (!config_json) {
+        ESP_LOGE(TAG, "Failed to allocate memory for MCP config");
+        fclose(file);
+        return false;
+    }
+    
+    size_t bytes_read = fread(config_json, 1, size, file);
+    fclose(file);
+    config_json[bytes_read] = '\0';
+    
+    if (bytes_read != size) {
+        ESP_LOGE(TAG, "Failed to read MCP config completely");
+        free(config_json);
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "MCP config file loaded (%zu bytes)", bytes_read);
+    
+    // Parse GPIO protection settings
+    g_mcp_config.gpio_protection.protected_pin_count = json_parse_int_array(
+        config_json, "protected_pins", 
+        g_mcp_config.gpio_protection.protected_pins, 
+        MAX_PROTECTED_PINS
+    );
+    
+    g_mcp_config.gpio_protection.input_only_pin_count = json_parse_int_array(
+        config_json, "input_only_pins",
+        g_mcp_config.gpio_protection.input_only_pins,
+        MAX_PROTECTED_PINS
+    );
+    
+    g_mcp_config.gpio_protection.max_current_pin_count = json_parse_int_array(
+        config_json, "max_current_pins",
+        g_mcp_config.gpio_protection.max_current_pins,
+        MAX_PROTECTED_PINS
+    );
+    
+    // Parse system settings
+    json_find_int(config_json, "max_wasm_modules", &g_mcp_config.system.max_wasm_modules);
+    json_find_int(config_json, "wasm_heap_size", &g_mcp_config.system.wasm_heap_size);
+    json_find_int(config_json, "wasm_stack_size", &g_mcp_config.system.wasm_stack_size);
+    json_find_int(config_json, "sse_max_clients", &g_mcp_config.system.sse_max_clients);
+    json_find_int(config_json, "mcp_timeout_ms", &g_mcp_config.system.mcp_timeout_ms);
+    
+    // Parse security settings
+    json_find_bool(config_json, "require_auth", &g_mcp_config.require_auth);
+    json_find_int(config_json, "rate_limit_per_minute", &g_mcp_config.rate_limit_per_minute);
+    
+    // Parse routes from nested JSON structure
+    g_mcp_config.route_count = 0;
+    
+    // Find the "routes" object in the JSON
+    const char* routes_start = strstr(config_json, "\"routes\"");
+    if (routes_start) {
+        // Find the opening brace of the routes object
+        const char* routes_obj = strchr(routes_start, '{');
+        if (routes_obj) {
+            routes_obj++; // Skip the opening brace
+            
+            // Parse individual route entries
+            const char* route_patterns[] = {"\"/mcp\"", "\"/mcp/led\"", "\"/mcp/gpio\"", "\"/mcp/system\""};
+            const char* route_names[] = {"/mcp", "/mcp/led", "/mcp/gpio", "/mcp/system"};
+            
+            for (int i = 0; i < 4 && g_mcp_config.route_count < MAX_MCP_ROUTES; i++) {
+                const char* route_entry = strstr(routes_obj, route_patterns[i]);
+                if (route_entry) {
+                    // Find the value after the colon
+                    const char* colon = strchr(route_entry, ':');
+                    if (colon) {
+                        colon++; // Skip colon
+                        while (*colon == ' ' || *colon == '\t') colon++; // Skip whitespace
+                        
+                        if (*colon == '"') {
+                            colon++; // Skip opening quote
+                            char wasm_file[MAX_FILENAME_LENGTH];
+                            int j = 0;
+                            while (*colon && *colon != '"' && j < MAX_FILENAME_LENGTH - 1) {
+                                wasm_file[j++] = *colon++;
+                            }
+                            wasm_file[j] = '\0';
+                            
+                            // Store the route
+                            strncpy(g_mcp_config.routes[g_mcp_config.route_count].route, route_names[i], MAX_ROUTE_LENGTH - 1);
+                            strncpy(g_mcp_config.routes[g_mcp_config.route_count].wasm_file, wasm_file, MAX_FILENAME_LENGTH - 1);
+                            g_mcp_config.route_count++;
+                            
+                            ESP_LOGI(TAG, "Parsed route: %s -> %s", route_names[i], wasm_file);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    free(config_json);
+    
+    ESP_LOGI(TAG, "MCP config loaded successfully:");
+    ESP_LOGI(TAG, "  Protected pins: %d", g_mcp_config.gpio_protection.protected_pin_count);
+    ESP_LOGI(TAG, "  Input-only pins: %d", g_mcp_config.gpio_protection.input_only_pin_count);
+    ESP_LOGI(TAG, "  Max current pins: %d", g_mcp_config.gpio_protection.max_current_pin_count);
+    ESP_LOGI(TAG, "  Routes configured: %d", g_mcp_config.route_count);
+    ESP_LOGI(TAG, "  Max WASM modules: %d", g_mcp_config.system.max_wasm_modules);
+    ESP_LOGI(TAG, "  WASM heap size: %d", g_mcp_config.system.wasm_heap_size);
+    
+    return true;
+}
+
+// Initialize MCP configuration
+static bool init_mcp_config(void) {
+    if (g_mcp_config_loaded) {
+        return true;
+    }
+    
+    // Set defaults first
+    g_mcp_config.system.max_wasm_modules = 4;
+    g_mcp_config.system.wasm_heap_size = 32768;
+    g_mcp_config.system.wasm_stack_size = 8192;
+    g_mcp_config.system.sse_max_clients = 8;
+    g_mcp_config.system.mcp_timeout_ms = 5000;
+    g_mcp_config.require_auth = false;
+    g_mcp_config.rate_limit_per_minute = 100;
+    
+    // Try to load from SD card first
+    ESP_LOGI(TAG, "Attempting to load MCP config from SD card...");
+    if (load_mcp_config_from_file("/sdcard/cfg.jsn")) {
+        ESP_LOGI(TAG, "MCP config loaded from SD card");
+        g_mcp_config_loaded = true;
+        
+        // Register MCP endpoints now that config is loaded
+        register_mcp_endpoints(server);
+        
+        return true;
+    }
+    
+    // Also try without extension in case of FAT32 8.3 filename issues
+    ESP_LOGI(TAG, "Trying alternative config filename...");
+    if (load_mcp_config_from_file("/sdcard/mcp_config.json")) {
+        ESP_LOGI(TAG, "MCP config loaded from SD card (full filename)");
+        g_mcp_config_loaded = true;
+        
+        // Register MCP endpoints now that config is loaded
+        register_mcp_endpoints(server);
+        
+        return true;
+    }
+    
+    // Try to load from SPIFFS/NVS (embedded)
+    if (load_mcp_config_from_file("/spiffs/cfg.jsn")) {
+        ESP_LOGI(TAG, "MCP config loaded from embedded storage");
+        g_mcp_config_loaded = true;
+        return true;
+    }
+    
+    ESP_LOGW(TAG, "No MCP config file found, using defaults");
+    
+    // Set up default routes
+    strncpy(g_mcp_config.routes[0].route, "/mcp", MAX_ROUTE_LENGTH - 1);
+    strncpy(g_mcp_config.routes[0].wasm_file, "default_mcp.wasm", MAX_FILENAME_LENGTH - 1);
+    g_mcp_config.route_count = 1;
+    
+    // Set default protected pins (ESP32 boot/flash pins)
+    int default_protected[] = {0, 1, 6, 7, 8, 9, 10, 11};
+    int default_input_only[] = {34, 35, 36, 39};
+    
+    g_mcp_config.gpio_protection.protected_pin_count = 8;
+    memcpy(g_mcp_config.gpio_protection.protected_pins, default_protected, sizeof(default_protected));
+    
+    g_mcp_config.gpio_protection.input_only_pin_count = 4;
+    memcpy(g_mcp_config.gpio_protection.input_only_pins, default_input_only, sizeof(default_input_only));
+    
+    g_mcp_config_loaded = true;
+    return true;
+}
+
+// Check if a GPIO pin is protected
+// Note: These functions are currently unused but will be needed for future enhancements
+#if 0
+static bool is_gpio_pin_protected(int pin) {
+    for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+        if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Check if a GPIO pin is input-only
+static bool is_gpio_pin_input_only(int pin) {
+    for (int i = 0; i < g_mcp_config.gpio_protection.input_only_pin_count; i++) {
+        if (g_mcp_config.gpio_protection.input_only_pins[i] == pin) {
+            return true;
+        }
+    }
+    return false;
+}
+#endif
 
 // Include the generated WASM bytecode  
 // #include "../led_controller_wasm.h"  // Rust WASM (193 bytes)
@@ -223,6 +582,279 @@ static esp_err_t sse_handler(httpd_req_t *req) {
 }
 
 // API endpoint to toggle LED via WASM
+// MCP WASM Module Management
+typedef struct {
+    char route[64];
+    char wasm_file[64];
+    wasm_module_t wasm_module;
+    wasm_module_inst_t wasm_module_inst;
+    wasm_exec_env_t exec_env;
+    bool loaded;
+} mcp_wasm_module_t;
+
+static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
+static int g_mcp_module_count = 0;
+static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Load WASM module for MCP route
+static mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
+    pthread_mutex_lock(&g_mcp_modules_mutex);
+    
+    // Check if already loaded
+    for (int i = 0; i < g_mcp_module_count; i++) {
+        if (strcmp(g_mcp_modules[i].route, route) == 0 && g_mcp_modules[i].loaded) {
+            pthread_mutex_unlock(&g_mcp_modules_mutex);
+            return &g_mcp_modules[i];
+        }
+    }
+    
+    // Find empty slot
+    if (g_mcp_module_count >= 8) {
+        ESP_LOGE(TAG, "Maximum number of MCP modules reached");
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    mcp_wasm_module_t* module = &g_mcp_modules[g_mcp_module_count];
+    strncpy(module->route, route, sizeof(module->route) - 1);
+    strncpy(module->wasm_file, wasm_filename, sizeof(module->wasm_file) - 1);
+    module->loaded = false;
+    
+    // Load WASM file
+    char wasm_path[128];
+    snprintf(wasm_path, sizeof(wasm_path), "/sdcard/wasm/%s", wasm_filename);
+    
+    FILE *file = fopen(wasm_path, "rb");
+    if (!file) {
+        ESP_LOGE(TAG, "Failed to open WASM file: %s", wasm_path);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    // Get file size
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    
+    // Allocate buffer
+    uint8_t *wasm_file_buf = malloc(file_size);
+    if (!wasm_file_buf) {
+        ESP_LOGE(TAG, "Failed to allocate memory for WASM file");
+        fclose(file);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    // Read file
+    size_t bytes_read = fread(wasm_file_buf, 1, file_size, file);
+    fclose(file);
+    
+    if (bytes_read != file_size) {
+        ESP_LOGE(TAG, "Failed to read WASM file completely");
+        free(wasm_file_buf);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    // Load WASM module
+    char error_buf[128];
+    module->wasm_module = wasm_runtime_load(wasm_file_buf, file_size, error_buf, sizeof(error_buf));
+    free(wasm_file_buf);
+    
+    if (!module->wasm_module) {
+        ESP_LOGE(TAG, "Failed to load WASM module %s: %s", wasm_filename, error_buf);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    // Instantiate WASM module
+    uint32_t stack_size = 8192;
+    uint32_t heap_size = 32768;
+    module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
+    
+    if (!module->wasm_module_inst) {
+        ESP_LOGE(TAG, "Failed to instantiate WASM module %s: %s", wasm_filename, error_buf);
+        wasm_runtime_unload(module->wasm_module);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    // Create execution environment
+    module->exec_env = wasm_runtime_create_exec_env(module->wasm_module_inst, stack_size);
+    if (!module->exec_env) {
+        ESP_LOGE(TAG, "Failed to create execution environment for %s", wasm_filename);
+        wasm_runtime_deinstantiate(module->wasm_module_inst);
+        wasm_runtime_unload(module->wasm_module);
+        pthread_mutex_unlock(&g_mcp_modules_mutex);
+        return NULL;
+    }
+    
+    module->loaded = true;
+    g_mcp_module_count++;
+    
+    ESP_LOGI(TAG, "Successfully loaded MCP WASM module: %s -> %s", route, wasm_filename);
+    pthread_mutex_unlock(&g_mcp_modules_mutex);
+    return module;
+}
+
+// Find WASM filename for route
+static const char* find_wasm_for_route(const char* route) {
+    // Check exact route match first
+    for (int i = 0; i < MAX_MCP_ROUTES && g_mcp_config.routes[i].route[0] != '\0'; i++) {
+        if (strcmp(g_mcp_config.routes[i].route, route) == 0) {
+            return g_mcp_config.routes[i].wasm_file;
+        }
+    }
+    
+    // Check prefix match (e.g., "/mcp/led" matches "/mcp")
+    for (int i = 0; i < MAX_MCP_ROUTES && g_mcp_config.routes[i].route[0] != '\0'; i++) {
+        int route_len = strlen(g_mcp_config.routes[i].route);
+        if (strncmp(g_mcp_config.routes[i].route, route, route_len) == 0 &&
+            (route[route_len] == '/' || route[route_len] == '\0')) {
+            return g_mcp_config.routes[i].wasm_file;
+        }
+    }
+    
+    return NULL;
+}
+
+// MCP HTTP Request Handler
+static esp_err_t mcp_handler(httpd_req_t *req) {
+    char content[2048];
+    char response[2048];
+    int ret, remaining = req->content_len;
+    
+    // Read request body
+    if (remaining >= sizeof(content)) {
+        ESP_LOGE(TAG, "MCP request too large: %d bytes", remaining);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Request too large");
+        return ESP_FAIL;
+    }
+    
+    ret = httpd_req_recv(req, content, remaining);
+    if (ret <= 0) {
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Request timeout");
+        } else {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read request");
+        }
+        return ESP_FAIL;
+    }
+    content[ret] = '\0';
+    
+    ESP_LOGI(TAG, "MCP request to %s: %s", req->uri, content);
+    
+    // Find WASM module for this route
+    const char* wasm_filename = find_wasm_for_route(req->uri);
+    if (!wasm_filename) {
+        ESP_LOGW(TAG, "No WASM module configured for route: %s", req->uri);
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Route not configured");
+        return ESP_FAIL;
+    }
+    
+    // Load WASM module
+    mcp_wasm_module_t* module = load_mcp_wasm_module(req->uri, wasm_filename);
+    if (!module) {
+        ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load WASM module");
+        return ESP_FAIL;
+    }
+    
+    // Look for MCP request handler function
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
+    if (!handle_request_func) {
+        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function", wasm_filename);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Invalid WASM module");
+        return ESP_FAIL;
+    }
+    
+    // Allocate WASM memory for request and response
+    uint32_t request_offset = wasm_runtime_module_malloc(module->wasm_module_inst, strlen(content) + 1, NULL);
+    uint32_t response_offset = wasm_runtime_module_malloc(module->wasm_module_inst, sizeof(response), NULL);
+    
+    if (request_offset == 0 || response_offset == 0) {
+        ESP_LOGE(TAG, "Failed to allocate WASM memory");
+        if (request_offset) wasm_runtime_module_free(module->wasm_module_inst, request_offset);
+        if (response_offset) wasm_runtime_module_free(module->wasm_module_inst, response_offset);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "WASM memory allocation failed");
+        return ESP_FAIL;
+    }
+    
+    // Copy request to WASM memory
+    void* request_ptr = wasm_runtime_addr_app_to_native(module->wasm_module_inst, request_offset);
+    void* response_ptr = wasm_runtime_addr_app_to_native(module->wasm_module_inst, response_offset);
+    strcpy((char*)request_ptr, content);
+    
+    // Call WASM function: handle_mcp_request(request, response, max_len)
+    uint32_t argv[3] = {request_offset, response_offset, sizeof(response)};
+    
+    bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
+    int32_t result = argv[0];  // Return value
+    
+    // Copy response from WASM memory
+    strcpy(response, (char*)response_ptr);
+    
+    // Free WASM memory
+    wasm_runtime_module_free(module->wasm_module_inst, request_offset);
+    wasm_runtime_module_free(module->wasm_module_inst, response_offset);
+    
+    if (!call_success || result != 0) {
+        ESP_LOGE(TAG, "WASM MCP handler failed: result=%d", result);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "WASM handler failed");
+        return ESP_FAIL;
+    }
+    
+    // Send JSON response
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    
+    ESP_LOGI(TAG, "MCP response: %s", response);
+    return httpd_resp_send(req, response, strlen(response));
+}
+
+// Handle CORS preflight requests
+static esp_err_t mcp_options_handler(httpd_req_t *req) {
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+    httpd_resp_send(req, "", 0);
+    return ESP_OK;
+}
+
+// Register MCP endpoints after config is loaded
+static void register_mcp_endpoints(httpd_handle_t server) {
+    if (!server) {
+        ESP_LOGE(TAG, "HTTP server not available for MCP endpoint registration");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Registering %d MCP endpoints...", g_mcp_config.route_count);
+    
+    for (int i = 0; i < g_mcp_config.route_count; i++) {
+        // Register POST handler for MCP requests
+        httpd_uri_t* mcp_post = malloc(sizeof(httpd_uri_t));
+        mcp_post->uri = strdup(g_mcp_config.routes[i].route);
+        mcp_post->method = HTTP_POST;
+        mcp_post->handler = mcp_handler;
+        mcp_post->user_ctx = NULL;
+        httpd_register_uri_handler(server, mcp_post);
+        
+        // Register OPTIONS handler for CORS preflight
+        httpd_uri_t* mcp_options = malloc(sizeof(httpd_uri_t));
+        mcp_options->uri = strdup(g_mcp_config.routes[i].route);
+        mcp_options->method = HTTP_OPTIONS;
+        mcp_options->handler = mcp_options_handler;
+        mcp_options->user_ctx = NULL;
+        httpd_register_uri_handler(server, mcp_options);
+        
+        ESP_LOGI(TAG, "Registered MCP endpoint: %s -> %s", 
+                 g_mcp_config.routes[i].route, 
+                 g_mcp_config.routes[i].wasm_file);
+    }
+}
+
 static esp_err_t led_toggle_handler(httpd_req_t *req) {
     const char *resp;
     
@@ -263,6 +895,7 @@ static httpd_handle_t start_webserver(void) {
     httpd_handle_t server = NULL;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
+    config.max_uri_handlers = 16;  // Increase from default 8 to 16
     
     ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
     
@@ -407,10 +1040,269 @@ static int32_t native_get_tick(wasm_exec_env_t exec_env)
     return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+// MCP Host Function Interface Implementation
+
+// GPIO Control Functions
+static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
+{
+    // Check if pin is protected
+    if (pin >= 0 && pin < 40) {
+        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+                ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
+                return -1; // Protected pin
+            }
+        }
+    }
+    
+    ESP_LOGI(TAG, "WASM setting GPIO %d to level %d", pin, level);
+    esp_err_t err = gpio_set_level((gpio_num_t)pin, level);
+    
+    // Update LED state if this is the LED pin
+    if (pin == LED_GPIO && g_led_state_mutex) {
+        if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            bool new_state = level ? true : false;
+            if (g_led_state != new_state) {
+                g_led_state = new_state;
+                g_led_state_changed = true;
+            }
+            xSemaphoreGive(g_led_state_mutex);
+        }
+    }
+    
+    return err == ESP_OK ? 0 : -2;
+}
+
+static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
+{
+    if (pin < 0 || pin >= 40) {
+        return -1; // Invalid pin
+    }
+    
+    return gpio_get_level((gpio_num_t)pin);
+}
+
+static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
+{
+    // Check if pin is protected
+    if (pin >= 0 && pin < 40) {
+        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+                ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
+                return -1;
+            }
+        }
+        
+        // Check if pin is input-only
+        for (int i = 0; i < g_mcp_config.gpio_protection.input_only_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.input_only_pins[i] == pin && direction != GPIO_MODE_INPUT) {
+                ESP_LOGW(TAG, "GPIO pin %d is input-only, output mode denied", pin);
+                return -2;
+            }
+        }
+    }
+    
+    esp_err_t err = gpio_set_direction((gpio_num_t)pin, (gpio_mode_t)direction);
+    return err == ESP_OK ? 0 : -3;
+}
+
+static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
+{
+    for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+        if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+            return 1; // Protected
+        }
+    }
+    return 0; // Not protected
+}
+
+// SSE Event Functions
+static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)event_type) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)data)) {
+        return -1; // Invalid string pointers
+    }
+    
+    ESP_LOGI(TAG, "WASM sending SSE event: %s = %s", event_type, data);
+    send_sse_event(event_type, data);
+    return 0;
+}
+
+static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tool_name) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)result)) {
+        return -1;
+    }
+    
+    // Create JSON-formatted tool result
+    char event_data[512];
+    snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
+    send_sse_event("tool_result", event_data);
+    return 0;
+}
+
+// System Info Functions
+static int32_t native_get_tick_count(wasm_exec_env_t exec_env)
+{
+    return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+}
+
+static int32_t native_get_free_heap(wasm_exec_env_t exec_env)
+{
+    return (int32_t)esp_get_free_heap_size();
+}
+
+static int32_t native_get_uptime_ms(wasm_exec_env_t exec_env)
+{
+    return (int32_t)(esp_timer_get_time() / 1000);
+}
+
+// JSON Helper Functions
+static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json, char* method, char* params, int32_t max_len)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)json) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)method, max_len) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)params, max_len)) {
+        return -1;
+    }
+    
+    // Parse JSON-RPC method
+    if (!json_find_string(json, "method", method, max_len)) {
+        return -2; // Method not found
+    }
+    
+    // Parse JSON-RPC params (extract the params object as string)
+    const char* params_start = strstr(json, "\"params\"");
+    if (params_start) {
+        params_start = strchr(params_start, ':');
+        if (params_start) {
+            params_start++; // Skip ':'
+            while (*params_start == ' ' || *params_start == '\t') params_start++; // Skip whitespace
+            
+            // Copy the params value
+            int i = 0;
+            int brace_depth = 0;
+            bool in_string = false;
+            bool escape_next = false;
+            
+            while (params_start[i] && i < max_len - 1) {
+                char c = params_start[i];
+                
+                if (escape_next) {
+                    escape_next = false;
+                } else if (c == '\\') {
+                    escape_next = true;
+                } else if (c == '"' && !escape_next) {
+                    in_string = !in_string;
+                } else if (!in_string) {
+                    if (c == '{') brace_depth++;
+                    else if (c == '}') brace_depth--;
+                    else if ((c == ',' || c == '}') && brace_depth == 0) break;
+                }
+                
+                params[i] = c;
+                i++;
+                
+                if (!in_string && brace_depth == 0 && (c == ']' || c == '"' || (c >= '0' && c <= '9'))) {
+                    // End of simple value
+                    i++;
+                    break;
+                }
+            }
+            params[i] = '\0';
+        } else {
+            strcpy(params, "null");
+        }
+    } else {
+        strcpy(params, "null");
+    }
+    
+    return 0;
+}
+
+static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)result) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
+        return -1;
+    }
+    
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":1}",
+        result);
+    
+    return len < max_len ? 0 : -2; // Buffer overflow
+}
+
+static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
+        return -1;
+    }
+    
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%ld,\"message\":\"%s\"},\"id\":1}",
+        (long)code, message);
+    
+    return len < max_len ? 0 : -2; // Buffer overflow
+}
+
+// Logging Functions
+static void native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
+        wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
+        ESP_LOGI(tag, "[WASM] %s", message);
+    }
+}
+
+static void native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
+        wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
+        ESP_LOGE(tag, "[WASM] %s", message);
+    }
+}
+
 // Native symbol table - exports native functions to WASM
 static NativeSymbol native_symbols[] = {
+    // Legacy functions
     {"led_control", native_led_control, "(i)i", NULL},
-    {"get_tick", native_get_tick, "()i", NULL}
+    {"get_tick", native_get_tick, "()i", NULL},
+    
+    // GPIO Control
+    {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
+    {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
+    {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
+    {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
+    
+    // SSE Events
+    {"sse_send_event", native_sse_send_event, "(**i", NULL},
+    {"sse_send_tool_result", native_sse_send_tool_result, "(**i", NULL},
+    
+    // System Info
+    {"get_tick_count", native_get_tick_count, "()i", NULL},
+    {"get_free_heap", native_get_free_heap, "()i", NULL},
+    {"get_uptime_ms", native_get_uptime_ms, "()i", NULL},
+    
+    // JSON Helper Functions
+    {"json_parse_request", native_json_parse_request, "(**i)i", NULL},
+    {"json_create_response", native_json_create_response, "(**i)i", NULL},
+    {"json_create_error", native_json_create_error, "(i**i)i", NULL},
+    
+    // Logging
+    {"log_info", native_log_info, "(**)v", NULL},
+    {"log_error", native_log_error, "(**)v", NULL}
 };
 
 // Helper function to create execution environment matching instantiation
@@ -502,6 +1394,14 @@ static bool mount_sd_card(void) {
     
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "✅ SD card mounted successfully via SDMMC fallback");
+    
+    // Initialize MCP configuration system now that SD card is mounted
+    if (!init_mcp_config()) {
+        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
+        // Continue anyway with defaults
+    } else {
+        ESP_LOGI(TAG, "MCP configuration system initialized");
+    }
         return true;
     } else {
         ESP_LOGE(TAG, "❌ Both SPI and SDMMC modes failed: %s", esp_err_to_name(ret));
@@ -662,7 +1562,7 @@ void iwasm_main(void *arg)
     
     // Load WASM file from SD card instead of embedded header
     // Try the 8.3 FAT32 short filename first
-    wasm_file_buf = load_wasm_from_sd("LED_CO~1.WAS", &wasm_file_buf_size);
+    wasm_file_buf = load_wasm_from_sd("led.was", &wasm_file_buf_size);
     if (!wasm_file_buf) {
         // If that fails, try the long filename
         ESP_LOGI(TAG, "Short filename failed, trying long filename...");
@@ -749,6 +1649,13 @@ void iwasm_main(void *arg)
 no_wasm_fallback:
     ESP_LOGW(TAG, "WASM initialization failed, falling back to direct GPIO control");
     wasm_available = false;
+    
+    // Initialize MCP configuration with defaults (SD card failed)
+    if (!init_mcp_config()) {
+        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
+    } else {
+        ESP_LOGI(TAG, "MCP configuration system initialized (defaults only)");
+    }
     goto main_loop;
 
 main_loop:    

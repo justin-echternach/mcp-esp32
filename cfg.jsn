@@ -1,0 +1,13 @@
+{
+  "gpio_protection": {
+    "protected_pins": [0, 1, 6, 7, 8, 9, 10, 11],
+    "input_only_pins": [34, 35, 36, 39],
+    "max_current_pins": [12, 13]
+  },
+  "routes": {
+    "/mcp": "default.was",
+    "/mcp/led": "led_ctrl.was",
+    "/mcp/gpio": "gpio_ctl.was",
+    "/mcp/system": "sys_info.was"
+  }
+}
