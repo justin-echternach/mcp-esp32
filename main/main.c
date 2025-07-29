@@ -116,20 +116,11 @@ static void *wamr_realloc(void *ptr, unsigned int size)
 
 // ========== HTTP Server & SSE Functions ==========
 
-// Send SSE event to all connected clients
+// Send SSE event (currently disabled - using direct streaming approach)
 static void send_sse_event(const char *event, const char *data) {
-    char sse_msg[256];
-    snprintf(sse_msg, sizeof(sse_msg), "event: %s\ndata: %s\n\n", event, data);
-    
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
-        if (sse_clients[i].active) {
-            int ret = send(sse_clients[i].fd, sse_msg, strlen(sse_msg), 0);
-            if (ret < 0) {
-                ESP_LOGW(TAG, "SSE client %d disconnected", i);
-                sse_clients[i].active = false;
-            }
-        }
-    }
+    // This function is temporarily disabled while we use the direct streaming approach
+    ESP_LOGD(TAG, "SSE event would be sent: %s = %s", event, data);
+    // TODO: Implement shared state mechanism for real-time LED events
 }
 
 // Root handler - simple status page
@@ -153,39 +144,53 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return httpd_resp_send(req, html, strlen(html));
 }
 
-// SSE handler for event stream
+// SSE handler for event stream - keeps connection alive
 static esp_err_t sse_handler(httpd_req_t *req) {
-    // Find free client slot
-    int client_idx = -1;
-    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
-        if (!sse_clients[i].active) {
-            client_idx = i;
-            break;
-        }
-    }
-    
-    if (client_idx < 0) {
-        ESP_LOGW(TAG, "No free SSE client slots");
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Too many SSE clients");
-    }
+    ESP_LOGI(TAG, "SSE client connecting...");
     
     // Set SSE headers
     httpd_resp_set_type(req, "text/event-stream");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
     httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     
-    // Store client
-    int fd = httpd_req_to_sockfd(req);
-    sse_clients[client_idx].fd = fd;
-    sse_clients[client_idx].active = true;
+    // Send initial welcome event
+    const char *welcome = "event: connected\ndata: Connected to ESP32 SSE\n\n";
+    if (httpd_resp_send_chunk(req, welcome, strlen(welcome)) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send welcome SSE event");
+        return ESP_FAIL;
+    }
     
-    ESP_LOGI(TAG, "SSE client %d connected (fd: %d)", client_idx, fd);
+    ESP_LOGI(TAG, "SSE client connected, starting event stream");
     
-    // Send initial event
-    const char *welcome = "event: connected\ndata: Connected to ESP32\n\n";
-    send(fd, welcome, strlen(welcome), 0);
+    // Keep connection alive and send periodic events
+    int event_count = 0;
+    while (true) {
+        // Send current LED status (we'll determine this from WASM state)
+        // For now, send a heartbeat every 5 seconds to test the connection
+        char event_msg[128];
+        snprintf(event_msg, sizeof(event_msg), 
+                "event: heartbeat\ndata: Event %d at %lu ms\n\n", 
+                event_count++, (unsigned long)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        
+        if (httpd_resp_send_chunk(req, event_msg, strlen(event_msg)) != ESP_OK) {
+            ESP_LOGW(TAG, "SSE client disconnected");
+            break;
+        }
+        
+        // Wait 5 seconds between heartbeat events
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        
+        // Limit to prevent infinite loop in testing
+        if (event_count > 100) {
+            ESP_LOGI(TAG, "SSE test limit reached, closing connection");
+            break;
+        }
+    }
     
-    // Keep connection alive
+    // Close the chunked response
+    httpd_resp_send_chunk(req, NULL, 0);
+    ESP_LOGI(TAG, "SSE connection closed");
     return ESP_OK;
 }
 
