@@ -349,8 +349,8 @@ static bool init_mcp_config(void) {
     
     // Set defaults first
     g_mcp_config.system.max_wasm_modules = 4;
-    g_mcp_config.system.wasm_heap_size = 32768;
-    g_mcp_config.system.wasm_stack_size = 8192;
+    g_mcp_config.system.wasm_heap_size = 8192;  // Reduced from 32KB to 8KB
+    g_mcp_config.system.wasm_stack_size = 4096; // Reduced from 8KB to 4KB
     g_mcp_config.system.sse_max_clients = 8;
     g_mcp_config.system.mcp_timeout_ms = 5000;
     g_mcp_config.require_auth = false;
@@ -684,7 +684,7 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     
     // Instantiate WASM module with smaller heap for MCP modules
     uint32_t stack_size = 4096;
-    uint32_t heap_size = 16384;
+    uint32_t heap_size = 4096;  // Reduced from 16KB to 4KB to match working LED WASM pattern
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -1609,7 +1609,7 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Instantiating WASM runtime");
     ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
     uint32_t stack_size = 4096;   // Stack size (from WASM compile)  
-    uint32_t heap_size = 32768;  // Smaller heap size for pthread context
+    uint32_t heap_size = 8192;   // Reduced from 32KB to 8KB to match working LED WASM
     
     if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
                                                      stack_size,
