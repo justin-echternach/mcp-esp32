@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/event_groups.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -22,11 +23,46 @@
 #include "driver/sdspi_host.h"
 #include "driver/spi_master.h"
 
+// HTTP Server includes
+#include "esp_http_server.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
+#include "esp_netif.h"
+#include "lwip/inet.h"
+
 #define LED_GPIO GPIO_NUM_5
 #define BLINK_PERIOD_MS 1000
 #define IWASM_MAIN_STACK_SIZE 8192
 
 static const char *TAG = "led-wamr";
+
+// WiFi Configuration
+#define WIFI_SSID      "your-ssid"
+#define WIFI_PASS      "your-password"
+#define WIFI_MAXIMUM_RETRY  5
+
+// HTTP Server globals
+static httpd_handle_t server = NULL;
+static EventGroupHandle_t wifi_event_group;
+static int s_retry_num = 0;
+const int WIFI_CONNECTED_BIT = BIT0;
+
+// SSE client tracking
+#define MAX_SSE_CLIENTS 4
+typedef struct {
+    int fd;
+    bool active;
+} sse_client_t;
+static sse_client_t sse_clients[MAX_SSE_CLIENTS] = {0};
+
+// Global WASM runtime variables for HTTP API access
+static wasm_module_inst_t g_wasm_module_inst = NULL;
+static wasm_exec_env_t g_exec_env = NULL;
+static bool g_wasm_available = false;
+
+// Forward declaration for WASM functions
+static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv);
 
 // Include the generated WASM bytecode  
 // #include "../led_controller_wasm.h"  // Rust WASM (193 bytes)
@@ -78,11 +114,244 @@ static void *wamr_realloc(void *ptr, unsigned int size)
     return new_ptr;
 }
 
+// ========== HTTP Server & SSE Functions ==========
+
+// Send SSE event to all connected clients
+static void send_sse_event(const char *event, const char *data) {
+    char sse_msg[256];
+    snprintf(sse_msg, sizeof(sse_msg), "event: %s\ndata: %s\n\n", event, data);
+    
+    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+        if (sse_clients[i].active) {
+            int ret = send(sse_clients[i].fd, sse_msg, strlen(sse_msg), 0);
+            if (ret < 0) {
+                ESP_LOGW(TAG, "SSE client %d disconnected", i);
+                sse_clients[i].active = false;
+            }
+        }
+    }
+}
+
+// Root handler - simple status page
+static esp_err_t root_handler(httpd_req_t *req) {
+    const char *html = "<html><body>"
+                      "<h1>ESP32 WASM LED Controller</h1>"
+                      "<p>LED Status: <span id='status'>Unknown</span></p>"
+                      "<button onclick='toggleLed()'>Toggle LED</button>"
+                      "<script>"
+                      "const evtSource = new EventSource('/events');"
+                      "evtSource.addEventListener('led_status', (e) => {"
+                      "  document.getElementById('status').textContent = e.data;"
+                      "});"
+                      "function toggleLed() {"
+                      "  fetch('/api/led/toggle', {method: 'POST'});"
+                      "}"
+                      "</script>"
+                      "</body></html>";
+    
+    httpd_resp_set_type(req, "text/html");
+    return httpd_resp_send(req, html, strlen(html));
+}
+
+// SSE handler for event stream
+static esp_err_t sse_handler(httpd_req_t *req) {
+    // Find free client slot
+    int client_idx = -1;
+    for (int i = 0; i < MAX_SSE_CLIENTS; i++) {
+        if (!sse_clients[i].active) {
+            client_idx = i;
+            break;
+        }
+    }
+    
+    if (client_idx < 0) {
+        ESP_LOGW(TAG, "No free SSE client slots");
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Too many SSE clients");
+    }
+    
+    // Set SSE headers
+    httpd_resp_set_type(req, "text/event-stream");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    
+    // Store client
+    int fd = httpd_req_to_sockfd(req);
+    sse_clients[client_idx].fd = fd;
+    sse_clients[client_idx].active = true;
+    
+    ESP_LOGI(TAG, "SSE client %d connected (fd: %d)", client_idx, fd);
+    
+    // Send initial event
+    const char *welcome = "event: connected\ndata: Connected to ESP32\n\n";
+    send(fd, welcome, strlen(welcome), 0);
+    
+    // Keep connection alive
+    return ESP_OK;
+}
+
+// API endpoint to toggle LED via WASM
+static esp_err_t led_toggle_handler(httpd_req_t *req) {
+    const char *resp;
+    
+    if (g_wasm_available && g_exec_env && g_wasm_module_inst) {
+        // Use WASM to toggle LED
+        wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
+        if (led_toggle_func) {
+            uint32_t argv[1] = {0}; // argument for led_toggle function
+            if (safe_wasm_call(g_exec_env, led_toggle_func, 1, argv)) {
+                int led_result = argv[0];
+                ESP_LOGI(TAG, "HTTP API: WASM LED toggle executed! LED %s", led_result ? "ON" : "OFF");
+                resp = led_result ? "{\"led\":\"on\"}" : "{\"led\":\"off\"}";
+                // SSE event already sent by native_led_control function
+            } else {
+                ESP_LOGE(TAG, "HTTP API: WASM LED toggle failed");
+                resp = "{\"error\":\"WASM toggle failed\"}";
+            }
+        } else {
+            ESP_LOGE(TAG, "HTTP API: WASM led_toggle function not found");
+            resp = "{\"error\":\"WASM function not found\"}";
+        }
+    } else {
+        // Fallback to direct GPIO if WASM not available
+        static bool led_state = false;
+        led_state = !led_state;
+        gpio_set_level(LED_GPIO, led_state);
+        send_sse_event("led_status", led_state ? "ON" : "OFF");
+        resp = led_state ? "{\"led\":\"on\"}" : "{\"led\":\"off\"}";
+        ESP_LOGW(TAG, "HTTP API: Using direct GPIO fallback, LED %s", led_state ? "ON" : "OFF");
+    }
+    
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+// Start HTTP server
+static httpd_handle_t start_webserver(void) {
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.lru_purge_enable = true;
+    
+    ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
+    
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Register URI handlers
+        httpd_uri_t root = {
+            .uri       = "/",
+            .method    = HTTP_GET,
+            .handler   = root_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &root);
+        
+        httpd_uri_t events = {
+            .uri       = "/events",
+            .method    = HTTP_GET,
+            .handler   = sse_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &events);
+        
+        httpd_uri_t led_toggle = {
+            .uri       = "/api/led/toggle",
+            .method    = HTTP_POST,
+            .handler   = led_toggle_handler,
+            .user_ctx  = NULL
+        };
+        httpd_register_uri_handler(server, &led_toggle);
+        
+        ESP_LOGI(TAG, "HTTP server started successfully");
+        return server;
+    }
+    
+    ESP_LOGE(TAG, "Failed to start HTTP server");
+    return NULL;
+}
+
+// WiFi event handler
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < WIFI_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "Retry connecting to WiFi...");
+        } else {
+            xEventGroupSetBits(wifi_event_group, BIT1);
+        }
+        ESP_LOGI(TAG,"WiFi connection failed");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+// Initialize WiFi
+static void wifi_init_sta(void) {
+    wifi_event_group = xEventGroupCreate();
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+    
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = WIFI_SSID,
+            .password = WIFI_PASS,
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+        },
+    };
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    ESP_LOGI(TAG, "WiFi initialization finished");
+    
+    // Wait for connection
+    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+            WIFI_CONNECTED_BIT | BIT1,
+            pdFALSE,
+            pdFALSE,
+            portMAX_DELAY);
+    
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "Connected to WiFi SSID: %s", WIFI_SSID);
+    } else {
+        ESP_LOGE(TAG, "Failed to connect to WiFi");
+    }
+}
+
+// ========== WASM Functions ==========
+
 // Native function to control LED
 static int32_t native_led_control(wasm_exec_env_t exec_env, int32_t state)
 {
     ESP_LOGI(TAG, "WASM called native_led_control with state: %d", state);
     gpio_set_level(LED_GPIO, state ? 1 : 0);
+    
+    // Send SSE event when LED state changes
+    send_sse_event("led_status", state ? "ON" : "OFF");
+    
     return state;
 }
 
@@ -397,6 +666,11 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
     wasm_available = true;
     
+    // Set global variables for HTTP API access
+    g_wasm_module_inst = wasm_module_inst;
+    g_exec_env = exec_env;
+    g_wasm_available = wasm_available;
+    
     // Test WASM LED function execution in pthread context
     if (exec_env) {
         ESP_LOGI(TAG, "Testing WASM LED functions in pthread context...");
@@ -523,7 +797,25 @@ void* wamr_pthread_main(void* arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Starting LED + WAMR test application");
+    ESP_LOGI(TAG, "Starting LED + WAMR + HTTP Server application");
+    
+    // Initialize NVS
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
+    // Initialize WiFi
+    ESP_LOGI(TAG, "Initializing WiFi...");
+    wifi_init_sta();
+    
+    // Start HTTP server
+    server = start_webserver();
+    if (server == NULL) {
+        ESP_LOGE(TAG, "Failed to start HTTP server");
+    }
     
     // Create pthread for ALL WAMR operations (like the reference code)
     pthread_t wamr_thread;
