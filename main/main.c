@@ -12,6 +12,9 @@
 #include <errno.h>
 #include <string.h>
 
+// MCP pthread handler
+#include "mcp_pthread_handler.h"
+
 // WAMR includes
 #include "wasm_export.h"
 #include "bh_platform.h"
@@ -597,7 +600,7 @@ static int g_mcp_module_count = 0;
 static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Load WASM module for MCP route
-static mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
+mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
     pthread_mutex_lock(&g_mcp_modules_mutex);
     
     // Check if already loaded
@@ -636,10 +639,10 @@ static mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wa
     long file_size = ftell(file);
     fseek(file, 0, SEEK_SET);
     
-    // Allocate buffer
+    // Allocate buffer - use smaller heap size to save memory
     uint8_t *wasm_file_buf = malloc(file_size);
     if (!wasm_file_buf) {
-        ESP_LOGE(TAG, "Failed to allocate memory for WASM file");
+        ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
         fclose(file);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
@@ -667,9 +670,9 @@ static mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wa
         return NULL;
     }
     
-    // Instantiate WASM module
-    uint32_t stack_size = 8192;
-    uint32_t heap_size = 32768;
+    // Instantiate WASM module with smaller heap for MCP modules
+    uint32_t stack_size = 4096;
+    uint32_t heap_size = 16384;
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -698,7 +701,7 @@ static mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wa
 }
 
 // Find WASM filename for route
-static const char* find_wasm_for_route(const char* route) {
+const char* find_wasm_for_route(const char* route) {
     // Check exact route match first
     for (int i = 0; i < MAX_MCP_ROUTES && g_mcp_config.routes[i].route[0] != '\0'; i++) {
         if (strcmp(g_mcp_config.routes[i].route, route) == 0) {
@@ -837,7 +840,7 @@ static void register_mcp_endpoints(httpd_handle_t server) {
         httpd_uri_t* mcp_post = malloc(sizeof(httpd_uri_t));
         mcp_post->uri = strdup(g_mcp_config.routes[i].route);
         mcp_post->method = HTTP_POST;
-        mcp_post->handler = mcp_handler;
+        mcp_post->handler = mcp_pthread_handler;
         mcp_post->user_ctx = NULL;
         httpd_register_uri_handler(server, mcp_post);
         
@@ -1554,6 +1557,13 @@ void iwasm_main(void *arg)
     }
     
     ESP_LOGI(TAG, "WASM runtime initialized successfully");
+    
+    // Initialize MCP pthread pool for concurrent request handling
+    ESP_LOGI(TAG, "Initializing MCP pthread pool...");
+    if (mcp_pthread_pool_init(g_mcp_config.system.max_wasm_modules) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize MCP pthread pool");
+        goto no_wasm_fallback;
+    }
     
     // Thread environment should be automatically handled in pthread context
     ESP_LOGI(TAG, "Running in pthread context - thread environment should be automatic");
