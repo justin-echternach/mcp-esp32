@@ -678,6 +678,21 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
         return NULL;
     }
     
+    // Unload LED WASM to free memory for MCP WASM
+    if (g_wasm_module_inst && g_exec_env) {
+        ESP_LOGI(TAG, "Unloading LED WASM to free memory for MCP WASM");
+        size_t free_before_unload = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        
+        wasm_runtime_destroy_exec_env(g_exec_env);
+        wasm_runtime_deinstantiate(g_wasm_module_inst);
+        g_exec_env = NULL;
+        g_wasm_module_inst = NULL;
+        g_wasm_available = false;
+        
+        size_t free_after_unload = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+        ESP_LOGI(TAG, "LED WASM unloaded: freed %zu bytes", free_after_unload - free_before_unload);
+    }
+    
     // Memory debugging before instantiation
     ESP_LOGI(TAG, "Memory before WASM instantiation: free=%zu bytes, largest_block=%zu bytes", 
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -1712,7 +1727,7 @@ main_loop:
     bool led_state = false;
     int count = 0;
     
-    if (wasm_available) {
+    if (g_wasm_available) {
         ESP_LOGI(TAG, "🔄 Starting WASM-controlled LED blink loop");
     } else {
         ESP_LOGI(TAG, "🔄 Starting direct GPIO LED blink loop");
@@ -1721,15 +1736,15 @@ main_loop:
     while (1) {
         led_state = !led_state;
         
-        if (wasm_available && exec_env) {
+        if (g_wasm_available && g_exec_env && g_wasm_module_inst) {
             // Use WASM to control LED directly!
             ESP_LOGD(TAG, "Using WASM LED control functions");
             
             // Try to call the WASM LED toggle function
-            wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(wasm_module_inst, "led_toggle");
+            wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
             if (led_toggle_func) {
                 uint32_t argv[1] = {count};
-                if (safe_wasm_call(exec_env, led_toggle_func, 1, argv)) {
+                if (safe_wasm_call(g_exec_env, led_toggle_func, 1, argv)) {
                     int led_result = argv[0];
                     ESP_LOGI(TAG, "🟢 WASM LED toggle executed! LED %s (count: %d)", 
                             led_result ? "ON" : "OFF", count++);
@@ -1741,11 +1756,11 @@ main_loop:
             } else {
                 // Fallback to basic LED on/off functions
                 wasm_function_inst_t led_func = led_state ? 
-                    wasm_runtime_lookup_function(wasm_module_inst, "led_on") :
-                    wasm_runtime_lookup_function(wasm_module_inst, "led_off");
+                    wasm_runtime_lookup_function(g_wasm_module_inst, "led_on") :
+                    wasm_runtime_lookup_function(g_wasm_module_inst, "led_off");
                     
                 if (led_func) {
-                    if (safe_wasm_call(exec_env, led_func, 0, NULL)) {
+                    if (safe_wasm_call(g_exec_env, led_func, 0, NULL)) {
                         ESP_LOGI(TAG, "🟢 WASM LED %s executed (count: %d)", 
                                 led_state ? "ON" : "OFF", count++);
                     } else {
