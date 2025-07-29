@@ -639,10 +639,18 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     long file_size = ftell(file);
     fseek(file, 0, SEEK_SET);
     
+    // Memory debugging before allocation
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "Memory before WASM allocation: free=%zu bytes, largest_block=%zu bytes, need=%ld bytes", 
+             free_heap, largest_block, file_size);
+    
     // Allocate buffer - use smaller heap size to save memory
     uint8_t *wasm_file_buf = malloc(file_size);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
+        ESP_LOGE(TAG, "Memory after failed allocation: free=%zu bytes, largest_block=%zu bytes", 
+                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         fclose(file);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
@@ -670,6 +678,10 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
         return NULL;
     }
     
+    // Memory debugging before instantiation
+    ESP_LOGI(TAG, "Memory before WASM instantiation: free=%zu bytes, largest_block=%zu bytes", 
+             heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
     // Instantiate WASM module with smaller heap for MCP modules
     uint32_t stack_size = 4096;
     uint32_t heap_size = 16384;
@@ -677,6 +689,8 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     
     if (!module->wasm_module_inst) {
         ESP_LOGE(TAG, "Failed to instantiate WASM module %s: %s", wasm_filename, error_buf);
+        ESP_LOGE(TAG, "Memory after failed instantiation: free=%zu bytes, largest_block=%zu bytes", 
+                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         wasm_runtime_unload(module->wasm_module);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
@@ -696,6 +710,8 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     g_mcp_module_count++;
     
     ESP_LOGI(TAG, "Successfully loaded MCP WASM module: %s -> %s", route, wasm_filename);
+    ESP_LOGI(TAG, "Memory after successful MCP module load: free=%zu bytes, largest_block=%zu bytes", 
+             heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     pthread_mutex_unlock(&g_mcp_modules_mutex);
     return module;
 }
