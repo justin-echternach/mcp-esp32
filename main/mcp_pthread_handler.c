@@ -181,11 +181,11 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     
     // Look for MCP request handler function
     ESP_LOGI(TAG, "🔍 DEBUG: About to lookup function in pthread context");
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
     ESP_LOGI(TAG, "🔍 DEBUG: Function lookup returned: %p", handle_request_func);
     
     if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing mcp_req function", wasm_filename);
+        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function", wasm_filename);
         ESP_LOGE(TAG, "🔍 DEBUG: Lookup failed - module_inst still: %p", module->wasm_module_inst);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");

@@ -775,14 +775,14 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     ESP_LOGI(TAG, "🔍 DEBUG: Before lookup - module ptr: %p, wasm_module: %p, wasm_module_inst: %p", 
              module, module->wasm_module, module->wasm_module_inst);
     
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
     if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing mcp_req function in load_mcp_wasm_module", wasm_filename);
+        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function in load_mcp_wasm_module", wasm_filename);
         
         return NULL;
     }
     else {
-        ESP_LOGI(TAG, "WASM module %s has mcp_req function", wasm_filename);
+        ESP_LOGI(TAG, "WASM module %s has handle_mcp_request function", wasm_filename);
         ESP_LOGI(TAG, "🔍 DEBUG: Function found at: %p", handle_request_func);
     }
     
