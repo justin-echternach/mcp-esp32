@@ -5,6 +5,7 @@
 #include <pthread.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include "wasm_export.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,6 +22,16 @@ typedef struct {
     pthread_mutex_t completion_mutex;
     pthread_cond_t completion_cond;
 } mcp_request_t;
+
+// MCP WASM Module Management structure (shared between main.c and pthread handler)
+typedef struct {
+    char route[64];
+    char wasm_file[64];
+    wasm_module_t wasm_module;
+    wasm_module_inst_t wasm_module_inst;
+    wasm_exec_env_t exec_env;
+    bool loaded;
+} mcp_wasm_module_t;
 
 // MCP pthread pool configuration
 typedef struct {
@@ -65,6 +76,23 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req);
  * @return esp_err_t ESP_OK on success
  */
 esp_err_t mcp_pthread_pool_stats(int* active_workers, int* queue_size);
+
+/**
+ * @brief Load WASM module for MCP route
+ * 
+ * @param route The MCP route (e.g., "/mcp/led")
+ * @param wasm_filename The WASM filename to load
+ * @return mcp_wasm_module_t* Pointer to loaded module or NULL on failure
+ */
+mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename);
+
+/**
+ * @brief Find WASM filename for a given route
+ * 
+ * @param route The MCP route to look up
+ * @return const char* WASM filename or NULL if not found
+ */
+const char* find_wasm_for_route(const char* route);
 
 #ifdef __cplusplus
 }

@@ -586,15 +586,7 @@ static esp_err_t sse_handler(httpd_req_t *req) {
 }
 
 // API endpoint to toggle LED via WASM
-// MCP WASM Module Management
-typedef struct {
-    char route[64];
-    char wasm_file[64];
-    wasm_module_t wasm_module;
-    wasm_module_inst_t wasm_module_inst;
-    wasm_exec_env_t exec_env;
-    bool loaded;
-} mcp_wasm_module_t;
+// MCP WASM Module Management - struct defined in mcp_pthread_handler.h
 
 static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
 static int g_mcp_module_count = 0;

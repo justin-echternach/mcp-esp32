@@ -9,17 +9,7 @@ static const char *TAG = "mcp-pthread";
 // Global pthread pool instance
 static mcp_pthread_pool_t g_pool = {0};
 
-// External references to WASM/MCP functions and types from main.c
-typedef struct {
-    wasm_module_t wasm_module;
-    wasm_module_inst_t wasm_module_inst;
-    wasm_exec_env_t exec_env;
-    char route[64];
-    char filename[32];
-} mcp_wasm_module_t;
-
-extern mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename);
-extern const char* find_wasm_for_route(const char* route);
+// External references are now declared in the header file
 
 // Forward declarations
 static void* mcp_worker_thread(void* arg);
