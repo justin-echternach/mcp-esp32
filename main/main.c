@@ -1374,19 +1374,107 @@ static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const
 }
 
 // String Functions (C library compatibility)
-static char* native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
+static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
 {
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)dest) ||
         !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)src)) {
-        return dest; // Return dest even on validation failure
+        return (uint32_t)dest; // Return dest even on validation failure
     }
     
     // Standard strcat implementation
     char* d = dest;
     while (*d) d++; // Find end of dest
     while ((*d++ = *src++)); // Copy src to end of dest
-    return dest;
+    return (uint32_t)dest; // Return WASM address
+}
+
+// Native strcmp implementation
+static int32_t native_strcmp(wasm_exec_env_t exec_env, const char* s1, const char* s2)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s1) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s2)) {
+        return -1; // Return error on validation failure
+    }
+    
+    return strcmp(s1, s2);
+}
+
+// Native strlen implementation
+static int32_t native_strlen(wasm_exec_env_t exec_env, const char* s)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    return (int32_t)strlen(s);
+}
+
+// Native strncpy implementation
+static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)src)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    strncpy(dest, src, n);
+    return (uint32_t)dest; // Return WASM address
+}
+
+// Native memcpy implementation  
+static int32_t native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src, int32_t n)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)src, n)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    memcpy(dest, src, n);
+    return (uint32_t)dest; // Return WASM address
+}
+
+// Native memcmp implementation
+static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)s1, n) ||
+        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)s2, n)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    return memcmp(s1, s2, n);
+}
+
+// Native strstr implementation
+static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, const char* needle)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)haystack) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)needle)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    char* result = strstr(haystack, needle);
+    return result ? (uint32_t)result : 0; // Return WASM address or 0 if not found
+}
+
+// Native snprintf implementation (simplified for WASM compatibility)
+static int32_t native_snprintf(wasm_exec_env_t exec_env, char* buffer, int32_t size, const char* format)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)buffer, size) ||
+        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)format)) {
+        return 0; // Return 0 on validation failure
+    }
+    
+    // For now, implement a basic version that handles the MCP SDK's usage
+    // This is a simplified version - real snprintf has variadic arguments
+    return snprintf(buffer, size, "%s", format);
 }
 
 // Native symbol table - exports native functions to WASM
@@ -1420,7 +1508,14 @@ static NativeSymbol native_symbols[] = {
     {"log_error", native_log_error, "(**)i", NULL},
     
     // String Functions (C library compatibility)  
-    {"strcat", native_strcat, "(**)i", NULL}
+    {"strcmp", native_strcmp, "(**)i", NULL},
+    {"strlen", native_strlen, "(*)i", NULL},
+    {"strcat", native_strcat, "(**)i", NULL},
+    {"strncpy", native_strncpy, "(**i)i", NULL},
+    {"memcpy", native_memcpy, "(**i)i", NULL},
+    {"memcmp", native_memcmp, "(**i)i", NULL},
+    {"strstr", native_strstr, "(**)i", NULL}
+    // Note: snprintf removed - too complex for WAMR (variadic function)
 };
 
 // Helper function to create execution environment matching instantiation
