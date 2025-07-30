@@ -200,5 +200,17 @@ void _start() {
 // Main MCP request handler (required export)
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
+    //  if (max_len > 7) {
+    //       response[0] = 's';
+    //       response[1] = 'u';
+    //       response[2] = 'c';
+    //       response[3] = 'c';
+    //       response[4] = 'e';
+    //       response[5] = 's';
+    //       response[6] = 's';
+    //       response[7] = '\0';
+    //       return 0;
+    //   }
+    //   return -1;
     return mcp_handle_request(request, response, max_len);
 }
