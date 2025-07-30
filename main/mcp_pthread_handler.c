@@ -118,6 +118,13 @@ static void* mcp_worker_thread(void* arg) {
     
     ESP_LOGI(TAG, "Worker pthread %d started", worker_id);
     
+    // Initialize WAMR thread environment for this pthread
+    if (!wasm_runtime_init_thread_env()) {
+        ESP_LOGE(TAG, "Worker %d: Failed to initialize WAMR thread environment", worker_id);
+        return NULL;
+    }
+    ESP_LOGD(TAG, "Worker %d: WAMR thread environment initialized", worker_id);
+    
     while (!g_pool.shutdown) {
         mcp_request_t* req = NULL;
         
@@ -145,6 +152,11 @@ static void* mcp_worker_thread(void* arg) {
     }
     
     ESP_LOGI(TAG, "Worker pthread %d exiting", worker_id);
+    
+    // Cleanup WAMR thread environment
+    wasm_runtime_destroy_thread_env();
+    ESP_LOGD(TAG, "Worker %d: WAMR thread environment destroyed", worker_id);
+    
     return NULL;
 }
 
@@ -160,21 +172,50 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         return ESP_FAIL;
     }
     
-    // Load WASM module dynamically (this now happens in pthread context!)
+    // Create separate WAMR runtime in pthread context (don't destroy main thread runtime)
+    // This tests if fresh pthread runtime fixes export name corruption
+    ESP_LOGI(TAG, "🔧 Creating separate WAMR runtime in pthread context");
+    
+    RuntimeInitArgs init_args;
+    memset(&init_args, 0, sizeof(RuntimeInitArgs));
+    
+    // Use system allocator to avoid DRAM overflow (smaller footprint)
+    init_args.mem_alloc_type = Alloc_With_System_Allocator;
+    
+    if (!wasm_runtime_full_init(&init_args)) {
+        ESP_LOGE(TAG, "❌ Failed to initialize pthread WAMR runtime");
+        snprintf(req->response, sizeof(req->response),
+                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WAMR init failed\"},\"id\":1}");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "✅ Separate WAMR runtime initialized in pthread context");
+    
+    // Load WASM module dynamically with separate pthread runtime
     mcp_wasm_module_t* module = load_mcp_wasm_module(req->uri, wasm_filename);
     if (!module) {
         ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
         snprintf(req->response, sizeof(req->response), 
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Failed to load WASM module\"},\"id\":1}");
+        
+        // Cleanup separate pthread WAMR runtime on error
+        ESP_LOGI(TAG, "🗝️ Destroying separate pthread WAMR runtime (module load failed)");
+        wasm_runtime_destroy();
+        
         return ESP_FAIL;
     }
     
     // Look for MCP request handler function
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
     if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function", wasm_filename);
+        ESP_LOGE(TAG, "WASM module %s missing mcp_req function", wasm_filename);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");
+        
+        // Cleanup separate pthread WAMR runtime on error
+        ESP_LOGI(TAG, "🗝️ Destroying separate pthread WAMR runtime (function lookup failed)");
+        wasm_runtime_destroy();
+        
         return ESP_FAIL;
     }
     
@@ -188,6 +229,11 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         if (response_offset) wasm_runtime_module_free(module->wasm_module_inst, response_offset);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM memory allocation failed\"},\"id\":1}");
+        
+        // Cleanup separate pthread WAMR runtime on error
+        ESP_LOGI(TAG, "🗝️ Destroying separate pthread WAMR runtime (memory allocation failed)");
+        wasm_runtime_destroy();
+        
         return ESP_FAIL;
     }
     
@@ -213,10 +259,20 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         ESP_LOGE(TAG, "WASM MCP handler failed: result=%d", result);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM handler failed\"},\"id\":1}");
+        
+        // Cleanup separate pthread WAMR runtime on error
+        ESP_LOGI(TAG, "🗝️ Destroying separate pthread WAMR runtime (error path)");
+        wasm_runtime_destroy();
+        
         return ESP_FAIL;
     }
     
     ESP_LOGI(TAG, "MCP request processed successfully: %s", req->response);
+    
+    // Cleanup separate pthread WAMR runtime
+    ESP_LOGI(TAG, "🗝️ Destroying separate pthread WAMR runtime");
+    wasm_runtime_destroy();
+    
     return ESP_OK;
 }
 

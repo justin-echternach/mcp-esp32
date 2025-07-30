@@ -60,6 +60,7 @@ typedef struct {
 // static sse_client_t sse_clients[MAX_SSE_CLIENTS] = {0}; // Unused for now
 
 // Global WASM runtime variables for HTTP API access
+static wasm_module_t g_wasm_module = NULL;
 static wasm_module_inst_t g_wasm_module_inst = NULL;
 static wasm_exec_env_t g_exec_env = NULL;
 static bool g_wasm_available = false;
@@ -599,6 +600,44 @@ static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
 static int g_mcp_module_count = 0;
 static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// Debug function to dump all WASM module exports
+static void dump_wasm_exports(wasm_module_t module, const char* module_name) {
+    if (!module) {
+        ESP_LOGW(TAG, "Cannot dump exports: module is NULL");
+        return;
+    }
+    
+    int32_t export_count = wasm_runtime_get_export_count(module);
+    ESP_LOGI(TAG, "🔍 WASM Module '%s' has %d exports:", module_name, export_count);
+    
+    if (export_count <= 0) {
+        ESP_LOGW(TAG, "  No exports found or error getting export count");
+        return;
+    }
+    
+    for (int32_t i = 0; i < export_count; i++) {
+        wasm_export_t export_info;
+        wasm_runtime_get_export_type(module, i, &export_info);
+        
+        const char* kind_str = "unknown";
+        switch (export_info.kind) {
+            case WASM_IMPORT_EXPORT_KIND_FUNC: kind_str = "function"; break;
+            case WASM_IMPORT_EXPORT_KIND_GLOBAL: kind_str = "global"; break;
+            case WASM_IMPORT_EXPORT_KIND_MEMORY: kind_str = "memory"; break;
+            case WASM_IMPORT_EXPORT_KIND_TABLE: kind_str = "table"; break;
+        }
+        
+        ESP_LOGI(TAG, "  [%d] %s: '%s'", i, kind_str, export_info.name ? export_info.name : "<null>");
+        
+        // Special highlight for mcp_req
+        if (export_info.name && strcmp(export_info.name, "mcp_req") == 0) {
+            ESP_LOGI(TAG, "  ✅ Found mcp_req export!");
+        }
+    }
+    
+    ESP_LOGI(TAG, "🔍 Export dump complete for '%s'", module_name);
+}
+
 // Load WASM module for MCP route
 mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
     pthread_mutex_lock(&g_mcp_modules_mutex);
@@ -685,8 +724,10 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
         
         wasm_runtime_destroy_exec_env(g_exec_env);
         wasm_runtime_deinstantiate(g_wasm_module_inst);
+        wasm_runtime_unload(g_wasm_module);
         g_exec_env = NULL;
         g_wasm_module_inst = NULL;
+        g_wasm_module = NULL;
         g_wasm_available = false;
         
         size_t free_after_unload = heap_caps_get_free_size(MALLOC_CAP_8BIT);
@@ -727,6 +768,9 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     ESP_LOGI(TAG, "Successfully loaded MCP WASM module: %s -> %s", route, wasm_filename);
     ESP_LOGI(TAG, "Memory after successful MCP module load: free=%zu bytes, largest_block=%zu bytes", 
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+    
+    // Debug: Dump all WASM exports to diagnose function lookup issues
+    dump_wasm_exports(module->wasm_module, wasm_filename);
     pthread_mutex_unlock(&g_mcp_modules_mutex);
     return module;
 }
@@ -795,9 +839,9 @@ static esp_err_t mcp_handler(httpd_req_t *req) {
     }
     
     // Look for MCP request handler function
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
     if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function", wasm_filename);
+        ESP_LOGE(TAG, "WASM module %s missing mcp_req function", wasm_filename);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Invalid WASM module");
         return ESP_FAIL;
     }
@@ -819,7 +863,7 @@ static esp_err_t mcp_handler(httpd_req_t *req) {
     void* response_ptr = wasm_runtime_addr_app_to_native(module->wasm_module_inst, response_offset);
     strcpy((char*)request_ptr, content);
     
-    // Call WASM function: handle_mcp_request(request, response, max_len)
+    // Call WASM function: mcp_req(request, response, max_len)
     uint32_t argv[3] = {request_offset, response_offset, sizeof(response)};
     
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
@@ -1677,9 +1721,13 @@ void iwasm_main(void *arg)
     wasm_available = true;
     
     // Set global variables for HTTP API access
+    g_wasm_module = wasm_module;
     g_wasm_module_inst = wasm_module_inst;
     g_exec_env = exec_env;
     g_wasm_available = wasm_available;
+    
+    // Debug: Dump LED WASM exports for comparison
+    dump_wasm_exports(wasm_module, "led.was");
     
     // Test WASM LED function execution in pthread context
     if (exec_env) {
