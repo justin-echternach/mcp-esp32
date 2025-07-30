@@ -17,5 +17,8 @@
     "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "UART",
-  "idf.monitorPort": "/dev/ttyUSB0"
+  "idf.monitorPort": "/dev/ttyUSB0",
+  "files.associations": {
+    "string.h": "c"
+  }
 }

@@ -771,7 +771,32 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     
     // Debug: Dump all WASM exports to diagnose function lookup issues
     dump_wasm_exports(module->wasm_module, wasm_filename);
+    
+    ESP_LOGI(TAG, "🔍 DEBUG: About to unlock mutex and test function lookup");
+    ESP_LOGI(TAG, "🔍 DEBUG: g_mcp_module_count = %d", g_mcp_module_count);
+    
+    // Unlock mutex before function lookup test
     pthread_mutex_unlock(&g_mcp_modules_mutex);
+    
+    // Debug: test if the function lookup works here
+    // Look for MCP request handler function
+    ESP_LOGI(TAG, "🔍 DEBUG: Before lookup - module ptr: %p, wasm_module: %p, wasm_module_inst: %p", 
+             module, module->wasm_module, module->wasm_module_inst);
+    
+    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
+    if (!handle_request_func) {
+        ESP_LOGE(TAG, "WASM module %s missing mcp_req function in load_mcp_wasm_module", wasm_filename);
+        
+        return NULL;
+    }
+    else {
+        ESP_LOGI(TAG, "WASM module %s has mcp_req function", wasm_filename);
+        ESP_LOGI(TAG, "🔍 DEBUG: Function found at: %p", handle_request_func);
+    }
+    
+    ESP_LOGI(TAG, "🔍 DEBUG: Returning module ptr: %p (array index: %d)", 
+             module, (int)(module - g_mcp_modules));
+    
     return module;
 }
 
