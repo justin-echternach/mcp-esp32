@@ -1259,17 +1259,53 @@ static int32_t native_get_uptime_ms(wasm_exec_env_t exec_env)
 // JSON Helper Functions
 static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json, char* method, char* params, int32_t max_len)
 {
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json, method, params, max_len);
+    
+    // Log actual parameter values before any validation
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Raw json address: 0x%x", (uint32_t)json);
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Raw method address: 0x%x", (uint32_t)method);
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Raw params address: 0x%x", (uint32_t)params);
+    
+    // Try to read the JSON content directly (unsafe, just for debugging)
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Attempting to read JSON content directly...");
+    if (json) {
+        ESP_LOGI(TAG, "🔍 JSON_PARSE: First few chars of JSON: '%c%c%c%c'", 
+                 json[0] ? json[0] : '?', 
+                 json[1] ? json[1] : '?', 
+                 json[2] ? json[2] : '?', 
+                 json[3] ? json[3] : '?');
+    }
+    
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)json) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)method, max_len) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)params, max_len)) {
+    
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: About to validate json address");
+    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)json)) {
+        ESP_LOGE(TAG, "🔍 JSON_PARSE: JSON validation failed");
         return -1;
     }
     
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: About to validate method address (64 bytes)");
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)method, 64)) {
+        ESP_LOGE(TAG, "🔍 JSON_PARSE: Method validation failed");
+        return -1;
+    }
+    
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: About to validate params address (%d bytes)", max_len);
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)params, max_len)) {
+        ESP_LOGE(TAG, "🔍 JSON_PARSE: Params validation failed");
+        return -1;
+    }
+    
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: All validations passed, JSON content: '%.50s'", json);
+    
     // Parse JSON-RPC method
-    if (!json_find_string(json, "method", method, max_len)) {
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: About to call json_find_string");
+    if (!json_find_string(json, "method", method, 64)) {  // method buffer is 64 bytes
+        ESP_LOGE(TAG, "🔍 JSON_PARSE: json_find_string failed - method not found");
         return -2; // Method not found
     }
+    
+    ESP_LOGI(TAG, "🔍 JSON_PARSE: Successfully parsed method: '%s'", method);
     
     // Parse JSON-RPC params (extract the params object as string)
     const char* params_start = strstr(json, "\"params\"");

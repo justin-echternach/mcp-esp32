@@ -200,15 +200,28 @@ void _start() {
 // Main MCP request handler (required export)
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
-    // Test: just copy the request string to the response to verify parameter passing
-    int i = 0;
-    while (i < max_len - 1 && request[i] != '\0') {
-        response[i] = request[i];
-        i++;
-    }
-    response[i] = '\0';
-    return 0;
+    // Test: Use response buffer as working space for method and params
+    // This way they'll be in the same WASM memory space as response
+    char* method = response;           // Use first 64 bytes of response
+    char* params = response + 64;      // Use next 512 bytes of response
     
-    // Original call (commented out for testing)
-    // return mcp_handle_request(request, response, max_len);
+    // Clear the method and params areas
+    for (int i = 0; i < 64; i++) method[i] = 0;
+    for (int i = 0; i < 512; i++) params[i] = 0;
+    
+    // Try to parse the JSON request
+    if (json_parse_request(request, method, params, 512) != 0) {
+        // If parsing fails, return the error (overwrite the cleared response)
+        response[0] = 'p'; response[1] = 'a'; response[2] = 'r'; response[3] = 's'; 
+        response[4] = 'e'; response[5] = '_'; response[6] = 'e'; response[7] = 'r';
+        response[8] = 'r'; response[9] = 'o'; response[10] = 'r'; response[11] = '\0';
+        return -1;
+    }
+    
+    // If parsing succeeds, return the parsed method (it's already in response buffer)
+    // method is already in response[0..63], just null-terminate the response at method end
+    int method_len = 0;
+    while (method_len < 64 && method[method_len] != '\0') method_len++;
+    response[method_len] = '\0';
+    return 0;
 }
