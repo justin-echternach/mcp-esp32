@@ -1503,7 +1503,7 @@ static NativeSymbol native_symbols[] = {
     {"get_uptime_ms", native_get_uptime_ms, "()i", NULL},
     
     // JSON Helper Functions
-    {"json_parse_request", native_json_parse_request, "(***i)i", NULL},
+    {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
     {"json_create_response", native_json_create_response, "(**i)i", NULL},
     {"json_create_error", native_json_create_error, "(i**i)i", NULL},
     

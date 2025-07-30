@@ -200,28 +200,29 @@ void _start() {
 // Main MCP request handler (required export)
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
-    // Test: Use response buffer as working space for method and params
-    // This way they'll be in the same WASM memory space as response
-    char* method = response;           // Use first 64 bytes of response
-    char* params = response + 64;      // Use next 512 bytes of response
+    // Allocate separate buffers on the stack for method and params
+    char method[64] = {0};
+    char params[512] = {0};
     
-    // Clear the method and params areas
-    for (int i = 0; i < 64; i++) method[i] = 0;
-    for (int i = 0; i < 512; i++) params[i] = 0;
-    
-    // Try to parse the JSON request
+    // Parse the JSON request
     if (json_parse_request(request, method, params, 512) != 0) {
-        // If parsing fails, return the error (overwrite the cleared response)
-        response[0] = 'p'; response[1] = 'a'; response[2] = 'r'; response[3] = 's'; 
-        response[4] = 'e'; response[5] = '_'; response[6] = 'e'; response[7] = 'r';
-        response[8] = 'r'; response[9] = 'o'; response[10] = 'r'; response[11] = '\0';
+        // Create error response
+        const char* error_msg = "Failed to parse JSON-RPC request";
+        int i = 0;
+        while (error_msg[i] != '\0' && i < max_len - 1) {
+            response[i] = error_msg[i];
+            i++;
+        }
+        response[i] = '\0';
         return -1;
     }
     
-    // If parsing succeeds, return the parsed method (it's already in response buffer)
-    // method is already in response[0..63], just null-terminate the response at method end
-    int method_len = 0;
-    while (method_len < 64 && method[method_len] != '\0') method_len++;
-    response[method_len] = '\0';
+    // For testing, return the parsed method
+    int i = 0;
+    while (method[i] != '\0' && i < max_len - 1) {
+        response[i] = method[i];
+        i++;
+    }
+    response[i] = '\0';
     return 0;
 }
