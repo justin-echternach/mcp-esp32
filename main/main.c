@@ -1361,16 +1361,16 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 // Logging Functions
 static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
-    ESP_LOGI(TAG, "🔍 LOG_INFO: Called with tag=%p, message=%p", tag, message);
+    //ESP_LOGI(TAG, "🔍 LOG_INFO: Called with tag=%p, message=%p", tag, message);
     
     // Since we're using automatic conversion ($**), the pointers are already native pointers
     // No validation needed - just direct access like json_parse_request
     
-    ESP_LOGI(TAG, "🔍 LOG_INFO: Tag content: '%.20s'", tag);
-    ESP_LOGI(TAG, "🔍 LOG_INFO: Message content: '%.50s'", message);
+    //ESP_LOGI(TAG, "🔍 LOG_INFO: Tag content: '%.20s'", tag);
+    //ESP_LOGI(TAG, "🔍 LOG_INFO: Message content: '%.50s'", message);
     
     ESP_LOGI(tag, "[WASM] %s", message);
-    ESP_LOGI(TAG, "🔍 LOG_INFO: Successfully logged message");
+    //ESP_LOGI(TAG, "🔍 LOG_INFO: Successfully logged message");
     return 0;
 }
 
