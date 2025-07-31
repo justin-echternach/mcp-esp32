@@ -201,12 +201,6 @@ void _start() {
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
     log_info("handle_mcp_request called", request);
-    // Echo request back to test parameter access
-    int i = 0;
-    while (request[i] != '\0' && i < max_len - 1) {
-        response[i] = request[i];
-        i++;
-    }
-    response[i] = '\0';
-    return 0;
+    // Use the full MCP SDK pipeline to handle the request
+    return mcp_handle_request(request, response, max_len);
 }

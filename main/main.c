@@ -1227,12 +1227,7 @@ static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pi
 // SSE Event Functions
 static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)event_type) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)data)) {
-        return -1; // Invalid string pointers
-    }
-    
+    // Using automatic string conversion ($$) - no validation needed
     ESP_LOGI(TAG, "WASM sending SSE event: %s = %s", event_type, data);
     send_sse_event(event_type, data);
     return 0;
@@ -1240,11 +1235,7 @@ static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event
 
 static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tool_name) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)result)) {
-        return -1;
-    }
+    // Using automatic string conversion ($$) - no validation needed
     
     // Create JSON-formatted tool result
     char event_data[512];
@@ -1339,9 +1330,9 @@ static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* j
 
 static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
 {
+    // Using automatic string conversion ($*i) - result is auto-converted, response is manual pointer
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)result) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
         return -1;
     }
     
@@ -1354,9 +1345,9 @@ static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char*
 
 static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
 {
+    // Using automatic string conversion (i$*i) - message is auto-converted, response is manual pointer
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
         return -1;
     }
     
@@ -1385,23 +1376,15 @@ static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const 
 
 static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
-        wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
-        ESP_LOGE(tag, "[WASM] %s", message);
-        return 0;
-    }
-    return -1;
+    // Using automatic string conversion ($$) - no validation needed
+    ESP_LOGE(tag, "[WASM] %s", message);
+    return 0;
 }
 
 // String Functions (C library compatibility)
 static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)dest) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)src)) {
-        return (uint32_t)dest; // Return dest even on validation failure
-    }
+    // Using automatic string conversion ($$) - no validation needed
     
     // Standard strcat implementation
     char* d = dest;
@@ -1413,32 +1396,23 @@ static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* s
 // Native strcmp implementation
 static int32_t native_strcmp(wasm_exec_env_t exec_env, const char* s1, const char* s2)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s1) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s2)) {
-        return -1; // Return error on validation failure
-    }
-    
+    // Using automatic string conversion ($$) - no validation needed
     return strcmp(s1, s2);
 }
 
 // Native strlen implementation
 static int32_t native_strlen(wasm_exec_env_t exec_env, const char* s)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)s)) {
-        return 0; // Return 0 on validation failure
-    }
-    
+    // Using automatic string conversion ($) - no validation needed
     return (int32_t)strlen(s);
 }
 
 // Native strncpy implementation
 static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n)
 {
+    // Using automatic string conversion ($*i) - src is auto-converted, dest is manual pointer
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)src)) {
+    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n)) {
         return 0; // Return 0 on validation failure
     }
     
@@ -1474,12 +1448,7 @@ static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const voi
 // Native strstr implementation
 static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, const char* needle)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)haystack) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)needle)) {
-        return 0; // Return 0 on validation failure
-    }
-    
+    // Using automatic string conversion ($$) - no validation needed
     char* result = strstr(haystack, needle);
     return result ? (uint32_t)result : 0; // Return WASM address or 0 if not found
 }
@@ -1511,8 +1480,8 @@ static NativeSymbol native_symbols[] = {
     {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
     
     // SSE Events
-    {"sse_send_event", native_sse_send_event, "(**)i", NULL},
-    {"sse_send_tool_result", native_sse_send_tool_result, "(**)i", NULL},
+    {"sse_send_event", native_sse_send_event, "($$)i", NULL},
+    {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
     
     // System Info
     {"get_tick_count", native_get_tick_count, "()i", NULL},
@@ -1521,21 +1490,21 @@ static NativeSymbol native_symbols[] = {
     
     // JSON Helper Functions
     {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
-    {"json_create_response", native_json_create_response, "(**i)i", NULL},
-    {"json_create_error", native_json_create_error, "(i**i)i", NULL},
+    {"json_create_response", native_json_create_response, "($*i)i", NULL},
+    {"json_create_error", native_json_create_error, "(i$*i)i", NULL},
     
     // Logging
     {"log_info", native_log_info, "($$)i", NULL},
     {"log_error", native_log_error, "($$)i", NULL},
     
     // String Functions (C library compatibility)  
-    {"strcmp", native_strcmp, "(**)i", NULL},
-    {"strlen", native_strlen, "(*)i", NULL},
-    {"strcat", native_strcat, "(**)i", NULL},
-    {"strncpy", native_strncpy, "(**i)i", NULL},
+    {"strcmp", native_strcmp, "($$)i", NULL},
+    {"strlen", native_strlen, "($)i", NULL},
+    {"strcat", native_strcat, "($$)i", NULL},
+    {"strncpy", native_strncpy, "($*i)i", NULL},
     {"memcpy", native_memcpy, "(**i)i", NULL},
     {"memcmp", native_memcmp, "(**i)i", NULL},
-    {"strstr", native_strstr, "(**)i", NULL}
+    {"strstr", native_strstr, "($$)i", NULL}
     // Note: snprintf removed - too complex for WAMR (variadic function)
 };
 
