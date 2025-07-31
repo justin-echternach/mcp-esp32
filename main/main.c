@@ -1370,13 +1370,17 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 // Logging Functions
 static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)tag) &&
-        wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)message)) {
-        ESP_LOGI(tag, "[WASM] %s", message);
-        return 0;
-    }
-    return -1;
+    ESP_LOGI(TAG, "🔍 LOG_INFO: Called with tag=%p, message=%p", tag, message);
+    
+    // Since we're using automatic conversion ($**), the pointers are already native pointers
+    // No validation needed - just direct access like json_parse_request
+    
+    ESP_LOGI(TAG, "🔍 LOG_INFO: Tag content: '%.20s'", tag);
+    ESP_LOGI(TAG, "🔍 LOG_INFO: Message content: '%.50s'", message);
+    
+    ESP_LOGI(tag, "[WASM] %s", message);
+    ESP_LOGI(TAG, "🔍 LOG_INFO: Successfully logged message");
+    return 0;
 }
 
 static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
@@ -1521,8 +1525,8 @@ static NativeSymbol native_symbols[] = {
     {"json_create_error", native_json_create_error, "(i**i)i", NULL},
     
     // Logging
-    {"log_info", native_log_info, "(**)i", NULL},
-    {"log_error", native_log_error, "(**)i", NULL},
+    {"log_info", native_log_info, "($$)i", NULL},
+    {"log_error", native_log_error, "($$)i", NULL},
     
     // String Functions (C library compatibility)  
     {"strcmp", native_strcmp, "(**)i", NULL},
