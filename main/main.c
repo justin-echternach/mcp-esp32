@@ -743,9 +743,9 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     ESP_LOGI(TAG, "Memory before WASM instantiation: free=%zu bytes, largest_block=%zu bytes", 
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     
-    // Instantiate WASM module with smaller heap for MCP modules
-    uint32_t stack_size = 4096;
-    uint32_t heap_size = 4096;  // Reduced from 16KB to 4KB to match working LED WASM pattern
+    // Instantiate WASM module with adequate memory for MCP operations
+    uint32_t stack_size = 16384;  // Increased from 4KB to 16KB for MCP SDK operations
+    uint32_t heap_size = 16384;   // Increased from 4KB to 16KB for string operations and buffers
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -1517,7 +1517,7 @@ static NativeSymbol native_symbols[] = {
     {"log_error", native_log_error, "($$)i", NULL},
     
     // String Functions (C library compatibility)  
-    {"strcmp", native_strcmp, "($$)i", NULL},
+    {"wasm_strcmp", native_strcmp, "($$)i", NULL},
     {"strlen", native_strlen, "($)i", NULL},
     {"strcat", native_strcat, "($$)i", NULL},
     {"strcpy", native_strcpy, "($*)i", NULL},

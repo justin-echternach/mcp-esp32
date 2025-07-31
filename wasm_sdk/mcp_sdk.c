@@ -2,7 +2,7 @@
 
 // Host-provided string functions (don't use standard library)
 // Use standard signatures to avoid compiler warnings
-extern int strcmp(const char* s1, const char* s2);
+extern int wasm_strcmp(const char* s1, const char* s2);
 extern unsigned long strlen(const char* s);
 extern char* strcat(char* dest, const char* src);
 extern char* strcpy(char* dest, const char* src);
@@ -75,19 +75,19 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     
     // Handle different MCP methods
     log_info("MCP", "mcp_handle_request: About to check initialize");
-    if (strcmp(method, "initialize") == 0) {
+    if (wasm_strcmp(method, "initialize") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialize");
         return handle_initialize(params, response, max_len);
     }
     
     log_info("MCP", "mcp_handle_request: About to check initialized");
-    if (strcmp(method, "initialized") == 0) {
+    if (wasm_strcmp(method, "initialized") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialized");
         return handle_initialized(response, max_len);
     }
     
     log_info("MCP", "mcp_handle_request: About to check tools/list");
-    if (strcmp(method, "tools/list") == 0) {
+    if (wasm_strcmp(method, "tools/list") == 0) {
         log_info("MCP", "mcp_handle_request: Matched tools/list, checking state");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             log_info("MCP", "mcp_handle_request: Server not initialized, creating error");
@@ -98,7 +98,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     }
     
     log_info("MCP", "mcp_handle_request: About to check tools/call");
-    if (strcmp(method, "tools/call") == 0) {
+    if (wasm_strcmp(method, "tools/call") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             return json_create_error(-32002, "Server not initialized", response, max_len);
@@ -107,7 +107,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     } 
     
     log_info("MCP", "mcp_handle_request: About to check ping");
-    if (strcmp(method, "ping") == 0) {
+    if (wasm_strcmp(method, "ping") == 0) {
         log_info("MCP", "mcp_handle_request: Calling ping handler");
         return json_create_response("{\"message\":\"pong\"}", response, max_len);
     }
@@ -164,7 +164,7 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
         char tool_json[512];
         
         // Create tool schema based on tool name
-        if (strcmp(g_tools[i].name, "control_led") == 0) {
+        if (wasm_strcmp(g_tools[i].name, "control_led") == 0) {
             snprintf(tool_json, sizeof(tool_json),
                 "%s{\"name\":\"%s\",\"description\":\"%s\","
                 "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
@@ -172,7 +172,7 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
                 "\"state\":{\"type\":\"number\",\"description\":\"LED state (0=off, 1=on)\"}"
                 "},\"required\":[\"pin\",\"state\"]}}",
                 i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
-        } else if (strcmp(g_tools[i].name, "get_led_status") == 0 || strcmp(g_tools[i].name, "toggle_led") == 0) {
+        } else if (wasm_strcmp(g_tools[i].name, "get_led_status") == 0 || wasm_strcmp(g_tools[i].name, "toggle_led") == 0) {
             snprintf(tool_json, sizeof(tool_json),
                 "%s{\"name\":\"%s\",\"description\":\"%s\","
                 "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
@@ -213,7 +213,7 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
     
     // Find and call the tool
     for (int i = 0; i < g_tool_count; i++) {
-        if (strcmp(g_tools[i].name, tool_name) == 0) {
+        if (wasm_strcmp(g_tools[i].name, tool_name) == 0) {
             mcp_result_t result = g_tools[i].handler(tool_params);
             
             if (result.code == 0) {
