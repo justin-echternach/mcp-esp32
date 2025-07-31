@@ -5,6 +5,8 @@
 // SDK Implementation for MCP WASM Modules
 
 // Forward declarations
+static int32_t handle_initialize(const char* params, char* response, int32_t max_len);
+static int32_t handle_initialized(char* response, int32_t max_len);
 static int32_t handle_tools_list(char* response, int32_t max_len);
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len);
 static int atoi(const char* str);
@@ -14,6 +16,7 @@ static char g_server_name[64] = "";
 static char g_server_version[16] = "";
 static mcp_tool_t g_tools[16];  // Max 16 tools per module
 static int g_tool_count = 0;
+static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
 
 // Initialize MCP server
 int32_t mcp_server_init(const char* server_name, const char* version) {
@@ -43,24 +46,86 @@ int32_t mcp_register_tool(const mcp_tool_t* tool) {
 
 // Handle MCP JSON-RPC request
 int32_t mcp_handle_request(const char* json_request, char* response, int32_t max_len) {
+    log_info("MCP", "mcp_handle_request: Starting");
+    
     char method[64];
     char params[512];
     
     // Parse JSON-RPC request
+    log_info("MCP", "mcp_handle_request: About to parse JSON");
     if (json_parse_request(json_request, method, params, sizeof(params)) != 0) {
+        log_error("MCP", "mcp_handle_request: JSON parse failed");
         return json_create_error(-32700, "Parse error", response, max_len);
     }
     
+    log_info("MCP", "mcp_handle_request: JSON parsed successfully");
+    
     // Handle different MCP methods
-    if (strcmp(method, "tools/list") == 0) {
+    if (strcmp(method, "initialize") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling handle_initialize");
+        return handle_initialize(params, response, max_len);
+    } else if (strcmp(method, "initialized") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling handle_initialized");
+        return handle_initialized(response, max_len);
+    } else if (strcmp(method, "tools/list") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling handle_tools_list");
+        if (g_mcp_state != MCP_STATE_INITIALIZED) {
+            return json_create_error(-32002, "Server not initialized", response, max_len);
+        }
         return handle_tools_list(response, max_len);
     } else if (strcmp(method, "tools/call") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
+        if (g_mcp_state != MCP_STATE_INITIALIZED) {
+            return json_create_error(-32002, "Server not initialized", response, max_len);
+        }
         return handle_tools_call(params, response, max_len);
     } else if (strcmp(method, "ping") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling ping handler");
         return json_create_response("{\"message\":\"pong\"}", response, max_len);
     } else {
+        log_error("MCP", "mcp_handle_request: Unknown method");
         return json_create_error(-32601, "Method not found", response, max_len);
     }
+}
+
+// Handle initialize request
+static int32_t handle_initialize(const char* params, char* response, int32_t max_len) {
+    log_info("MCP", "handle_initialize: Starting");
+    
+    g_mcp_state = MCP_STATE_INITIALIZING;
+    log_info("MCP", "handle_initialize: State set to initializing");
+    
+    // Parse client info from params if needed (protocol version, etc.)
+    // For now, just accept any initialize request
+    
+    log_info("MCP", "handle_initialize: About to create result JSON");
+    char result[512];
+    snprintf(result, sizeof(result),
+        "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{"
+        "\"tools\":{\"listChanged\":false},"
+        "\"resources\":{\"subscribe\":false,\"listChanged\":false},"
+        "\"prompts\":{\"listChanged\":false},"
+        "\"logging\":{}},"
+        "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"}}",
+        g_server_name, g_server_version);
+    
+    log_info("MCP", "handle_initialize: JSON created, about to call json_create_response");
+    log_info("MCP", "Initialize request received");
+    return json_create_response(result, response, max_len);
+}
+
+// Handle initialized notification
+static int32_t handle_initialized(char* response, int32_t max_len) {
+    if (g_mcp_state != MCP_STATE_INITIALIZING) {
+        return json_create_error(-32002, "Server not in initializing state", response, max_len);
+    }
+    
+    g_mcp_state = MCP_STATE_INITIALIZED;
+    log_info("MCP", "Server initialized successfully");
+    
+    // initialized is a notification, so no response content needed
+    response[0] = '\0';
+    return 0;
 }
 
 // Handle tools/list request
@@ -68,12 +133,31 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     char tools_json[1024] = "{\"tools\":[";
     
     for (int i = 0; i < g_tool_count; i++) {
-        char tool_json[256];
-        snprintf(tool_json, sizeof(tool_json),
-            "%s{\"name\":\"%s\",\"description\":\"%s\"}",
-            i > 0 ? "," : "",
-            g_tools[i].name,
-            g_tools[i].description);
+        char tool_json[512];
+        
+        // Create tool schema based on tool name
+        if (strcmp(g_tools[i].name, "control_led") == 0) {
+            snprintf(tool_json, sizeof(tool_json),
+                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+                "\"pin\":{\"type\":\"number\",\"description\":\"GPIO pin number (0-39)\"},"
+                "\"state\":{\"type\":\"number\",\"description\":\"LED state (0=off, 1=on)\"}"
+                "},\"required\":[\"pin\",\"state\"]}}",
+                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
+        } else if (strcmp(g_tools[i].name, "get_led_status") == 0 || strcmp(g_tools[i].name, "toggle_led") == 0) {
+            snprintf(tool_json, sizeof(tool_json),
+                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+                "\"pin\":{\"type\":\"number\",\"description\":\"GPIO pin number (0-39)\"}"
+                "},\"required\":[\"pin\"]}}",
+                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
+        } else {
+            // Default schema for tools without parameters
+            snprintf(tool_json, sizeof(tool_json),
+                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
+                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
+        }
         
         if (strlen(tools_json) + strlen(tool_json) + 3 < sizeof(tools_json)) {
             strcat(tools_json, tool_json);

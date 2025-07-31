@@ -63,6 +63,13 @@ extern int32_t log_error(const char* tag, const char* message);
 // Server initialization
 int32_t mcp_server_init(const char* server_name, const char* version);
 
+// MCP protocol state
+typedef enum {
+    MCP_STATE_UNINITIALIZED = 0,
+    MCP_STATE_INITIALIZING = 1,
+    MCP_STATE_INITIALIZED = 2
+} mcp_state_t;
+
 // Tool registration
 int32_t mcp_register_tool(const mcp_tool_t* tool);
 

@@ -200,27 +200,11 @@ void _start() {
 // Main MCP request handler (required export)
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
-    // Allocate separate buffers on the stack for method and params
-    char method[64] = {0};
-    char params[512] = {0};
-    
-    // Parse the JSON request
-    if (json_parse_request(request, method, params, 512) != 0) {
-        // Create error response
-        const char* error_msg = "Failed to parse JSON-RPC request";
-        int i = 0;
-        while (error_msg[i] != '\0' && i < max_len - 1) {
-            response[i] = error_msg[i];
-            i++;
-        }
-        response[i] = '\0';
-        return -1;
-    }
-    
-    // For testing, return the parsed method
+    log_info("handle_mcp_request called", request);
+    // Echo request back to test parameter access
     int i = 0;
-    while (method[i] != '\0' && i < max_len - 1) {
-        response[i] = method[i];
+    while (request[i] != '\0' && i < max_len - 1) {
+        response[i] = request[i];
         i++;
     }
     response[i] = '\0';

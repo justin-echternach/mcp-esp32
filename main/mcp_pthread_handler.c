@@ -192,25 +192,29 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         return ESP_FAIL;
     }
     
-    // Allocate WASM memory exactly like the basic sample
+    // Allocate WASM memory with manual offsets to stay within 64KB limit
     char* request_native_ptr;
     char* response_native_ptr;
-    uint64_t request_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, req->request_len + 1, (void**)&request_native_ptr);
-    // Use smaller response buffer to stay within WASM 64KB memory limit
-    size_t response_size = 512;  // Much smaller to avoid out-of-bounds 
-    uint64_t response_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, response_size, (void**)&response_native_ptr);
+    
+    // Use fixed offsets within the first 64KB of WASM memory
+    uint64_t request_wasm_buffer = 1024;  // Start at 1KB offset
+    uint64_t response_wasm_buffer = 2048; // Start at 2KB offset
+    size_t response_size = 512;  // Small response buffer
+    
+    // Get native pointers from WASM offsets
+    request_native_ptr = (char*)wasm_runtime_addr_app_to_native(module->wasm_module_inst, request_wasm_buffer);
+    response_native_ptr = (char*)wasm_runtime_addr_app_to_native(module->wasm_module_inst, response_wasm_buffer);
+    
+    // Validate we got valid pointers
+    if (!request_native_ptr || !response_native_ptr) {
+        ESP_LOGE(TAG, "Failed to get WASM memory pointers");
+        snprintf(req->response, sizeof(req->response),
+                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM memory mapping failed\"},\"id\":1}");
+        return ESP_FAIL;
+    }
     
     ESP_LOGI(TAG, "🔍 DEBUG: Allocated WASM memory - request_buffer: %llu, response_buffer: %llu", request_wasm_buffer, response_wasm_buffer);
     ESP_LOGI(TAG, "🔍 DEBUG: Native pointers - request_native_ptr: %p, response_native_ptr: %p", request_native_ptr, response_native_ptr);
-    
-    if (request_wasm_buffer == 0 || response_wasm_buffer == 0) {
-        ESP_LOGE(TAG, "Failed to allocate WASM memory");
-        if (request_wasm_buffer) wasm_runtime_module_free(module->wasm_module_inst, request_wasm_buffer);
-        if (response_wasm_buffer) wasm_runtime_module_free(module->wasm_module_inst, response_wasm_buffer);
-        snprintf(req->response, sizeof(req->response),
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM memory allocation failed\"},\"id\":1}");
-        return ESP_FAIL;
-    }
     
     // Copy request to WASM memory (using native pointers directly)
     strcpy(request_native_ptr, req->request_body);
@@ -223,7 +227,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     ESP_LOGI(TAG, "🔍 DEBUG: About to call WASM function with argv: [%u, %u, %u]", argv[0], argv[1], argv[2]);
     ESP_LOGI(TAG, "🔍 DEBUG: Request body in WASM memory: '%.100s'", request_native_ptr);
     ESP_LOGI(TAG, "🔍 DEBUG: WASM memory bounds: request ends at %u, response ends at %u, module has 65536 bytes", 
-             argv[0] + req->request_len + 1, argv[1] + response_size);
+             (uint32_t)(request_wasm_buffer + req->request_len + 1), (uint32_t)(response_wasm_buffer + response_size));
     
     // Clear any previous exceptions
     wasm_runtime_clear_exception(module->wasm_module_inst);
@@ -243,9 +247,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     strncpy(req->response, response_native_ptr, sizeof(req->response) - 1);
     req->response[sizeof(req->response) - 1] = '\0';
     
-    // Free WASM memory
-    wasm_runtime_module_free(module->wasm_module_inst, request_wasm_buffer);
-    wasm_runtime_module_free(module->wasm_module_inst, response_wasm_buffer);
+    // No need to free WASM memory - using fixed offsets
     
     if (!call_success) {
         const char* exception = wasm_runtime_get_exception(module->wasm_module_inst);
