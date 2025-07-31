@@ -673,15 +673,28 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     // Memory debugging before allocation
     size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+#ifdef CONFIG_SPIRAM
+    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Memory before WASM allocation: DRAM free=%zu, largest=%zu | PSRAM free=%zu, largest=%zu | need=%ld bytes", 
+             free_heap, largest_block, psram_free, psram_largest, file_size);
+#else
     ESP_LOGI(TAG, "Memory before WASM allocation: free=%zu bytes, largest_block=%zu bytes, need=%ld bytes", 
              free_heap, largest_block, file_size);
+#endif
     
     // Allocate buffer - use smaller heap size to save memory
     uint8_t *wasm_file_buf = malloc(file_size);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
+#ifdef CONFIG_SPIRAM
+        ESP_LOGE(TAG, "Memory after failed allocation: DRAM free=%zu, largest=%zu | PSRAM free=%zu, largest=%zu", 
+                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
+#else
         ESP_LOGE(TAG, "Memory after failed allocation: free=%zu bytes, largest_block=%zu bytes", 
                  heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+#endif
         fclose(file);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
