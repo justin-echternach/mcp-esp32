@@ -1396,6 +1396,7 @@ static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* s
 // Native strcmp implementation
 static int32_t native_strcmp(wasm_exec_env_t exec_env, const char* s1, const char* s2)
 {
+    ESP_LOGI("[WASM]", "strcmp called!");
     // Using automatic string conversion ($$) - no validation needed
     return strcmp(s1, s2);
 }
@@ -1453,6 +1454,24 @@ static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, con
     return result ? (uint32_t)result : 0; // Return WASM address or 0 if not found
 }
 
+// Native strcpy implementation
+static int32_t native_strcpy(wasm_exec_env_t exec_env, char* dest, const char* src)
+{
+    // Using automatic string conversion ($$) - no validation needed for src
+    // dest is a pointer that we need to validate
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    // We can't easily validate dest size, so we'll trust the WASM code
+    strcpy(dest, src);
+    return (uint32_t)dest; // Return WASM address
+}
+
+// Native strncmp implementation
+static int32_t native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, unsigned long n)
+{
+    // Using automatic string conversion ($$) - no validation needed
+    return strncmp(s1, s2, n);
+}
+
 // Native snprintf implementation (simplified for WASM compatibility)
 static int32_t native_snprintf(wasm_exec_env_t exec_env, char* buffer, int32_t size, const char* format)
 {
@@ -1501,7 +1520,9 @@ static NativeSymbol native_symbols[] = {
     {"strcmp", native_strcmp, "($$)i", NULL},
     {"strlen", native_strlen, "($)i", NULL},
     {"strcat", native_strcat, "($$)i", NULL},
+    {"strcpy", native_strcpy, "($*)i", NULL},
     {"strncpy", native_strncpy, "($*i)i", NULL},
+    {"strncmp", native_strncmp, "($$i)i", NULL},
     {"memcpy", native_memcpy, "(**i)i", NULL},
     {"memcmp", native_memcmp, "(**i)i", NULL},
     {"strstr", native_strstr, "($$)i", NULL}

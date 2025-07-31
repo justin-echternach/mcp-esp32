@@ -1,6 +1,17 @@
 #include "mcp_sdk.h"
-#include <string.h>
-#include <stdio.h>
+
+// Host-provided string functions (don't use standard library)
+// Use standard signatures to avoid compiler warnings
+extern int strcmp(const char* s1, const char* s2);
+extern unsigned long strlen(const char* s);
+extern char* strcat(char* dest, const char* src);
+extern char* strcpy(char* dest, const char* src);
+extern char* strncpy(char* dest, const char* src, unsigned long n);
+extern char* strstr(const char* haystack, const char* needle);
+extern int strncmp(const char* s1, const char* s2, unsigned long n);
+
+// Host-provided formatting function
+extern int snprintf(char* buffer, unsigned long size, const char* format, ...);
 
 // SDK Implementation for MCP WASM Modules
 
@@ -57,35 +68,52 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
         log_error("MCP", "mcp_handle_request: JSON parse failed");
         return json_create_error(-32700, "Parse error", response, max_len);
     }
+
+    log_info("MCP - method: ", method);
     
     log_info("MCP", "mcp_handle_request: JSON parsed successfully");
     
     // Handle different MCP methods
+    log_info("MCP", "mcp_handle_request: About to check initialize");
     if (strcmp(method, "initialize") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialize");
         return handle_initialize(params, response, max_len);
-    } else if (strcmp(method, "initialized") == 0) {
+    }
+    
+    log_info("MCP", "mcp_handle_request: About to check initialized");
+    if (strcmp(method, "initialized") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialized");
         return handle_initialized(response, max_len);
-    } else if (strcmp(method, "tools/list") == 0) {
-        log_info("MCP", "mcp_handle_request: Calling handle_tools_list");
+    }
+    
+    log_info("MCP", "mcp_handle_request: About to check tools/list");
+    if (strcmp(method, "tools/list") == 0) {
+        log_info("MCP", "mcp_handle_request: Matched tools/list, checking state");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
+            log_info("MCP", "mcp_handle_request: Server not initialized, creating error");
             return json_create_error(-32002, "Server not initialized", response, max_len);
         }
+        log_info("MCP", "mcp_handle_request: Calling handle_tools_list");
         return handle_tools_list(response, max_len);
-    } else if (strcmp(method, "tools/call") == 0) {
+    }
+    
+    log_info("MCP", "mcp_handle_request: About to check tools/call");
+    if (strcmp(method, "tools/call") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             return json_create_error(-32002, "Server not initialized", response, max_len);
         }
         return handle_tools_call(params, response, max_len);
-    } else if (strcmp(method, "ping") == 0) {
+    } 
+    
+    log_info("MCP", "mcp_handle_request: About to check ping");
+    if (strcmp(method, "ping") == 0) {
         log_info("MCP", "mcp_handle_request: Calling ping handler");
         return json_create_response("{\"message\":\"pong\"}", response, max_len);
-    } else {
-        log_error("MCP", "mcp_handle_request: Unknown method");
-        return json_create_error(-32601, "Method not found", response, max_len);
     }
+    
+    log_error("MCP", "mcp_handle_request: Unknown method");
+    return json_create_error(-32601, "Method not found", response, max_len);
 }
 
 // Handle initialize request
