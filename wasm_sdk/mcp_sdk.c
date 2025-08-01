@@ -102,7 +102,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     log_info("MCP", "mcp_handle_request:About to check tools/list");
     if (wasm_strcmp(method, "tools/list") == 0) {
         log_info("MCP", "mcp_handle_request:Matched tools/list, checking state");
-        if (g_mcp_state != MCP_STATE_INITIALIZED) {
+        if (g_mcp_state != MCP_STATE_INITIALIZING) {
             log_info("MCP", "mcp_handle_request:Server not initialized, creating error");
             return json_create_error(-32002, "Server not initialized", response, max_len);
         }
@@ -171,42 +171,48 @@ static int32_t handle_initialized(char* response, int32_t max_len) {
 
 // Handle tools/list request
 static int32_t handle_tools_list(char* response, int32_t max_len) {
-    char tools_json[1024] = "{\"tools\":[";
+    // Use the response buffer directly to avoid large stack allocation
+    strcpy(response, "{\"tools\":[");
     
     for (int i = 0; i < g_tool_count; i++) {
-        char tool_json[512];
+        char tool_json[256];  // Reduced size
         
-        // Create tool schema based on tool name
+        // Create simplified tool schema - shorter descriptions to fit in smaller buffer
         if (wasm_strcmp(g_tools[i].name, "control_led") == 0) {
             snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "%s{\"name\":\"%s\",\"description\":\"Control LED\","
                 "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
-                "\"pin\":{\"type\":\"number\",\"description\":\"GPIO pin number (0-39)\"},"
-                "\"state\":{\"type\":\"number\",\"description\":\"LED state (0=off, 1=on)\"}"
+                "\"pin\":{\"type\":\"number\"},\"state\":{\"type\":\"number\"}"
                 "},\"required\":[\"pin\",\"state\"]}}",
-                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
-        } else if (wasm_strcmp(g_tools[i].name, "get_led_status") == 0 || wasm_strcmp(g_tools[i].name, "toggle_led") == 0) {
+                i > 0 ? "," : "", g_tools[i].name);
+        } else if (wasm_strcmp(g_tools[i].name, "get_led_status") == 0) {
             snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "%s{\"name\":\"%s\",\"description\":\"Get LED status\","
                 "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
-                "\"pin\":{\"type\":\"number\",\"description\":\"GPIO pin number (0-39)\"}"
-                "},\"required\":[\"pin\"]}}",
-                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
+                "\"pin\":{\"type\":\"number\"}},\"required\":[\"pin\"]}}",
+                i > 0 ? "," : "", g_tools[i].name);
+        } else if (wasm_strcmp(g_tools[i].name, "toggle_led") == 0) {
+            snprintf(tool_json, sizeof(tool_json),
+                "%s{\"name\":\"%s\",\"description\":\"Toggle LED\","
+                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
+                "\"pin\":{\"type\":\"number\"}},\"required\":[\"pin\"]}}",
+                i > 0 ? "," : "", g_tools[i].name);
         } else {
             // Default schema for tools without parameters
             snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"%s\","
+                "%s{\"name\":\"%s\",\"description\":\"System info\","
                 "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-                i > 0 ? "," : "", g_tools[i].name, g_tools[i].description);
+                i > 0 ? "," : "", g_tools[i].name);
         }
         
-        if (strlen(tools_json) + strlen(tool_json) + 3 < sizeof(tools_json)) {
-            strcat(tools_json, tool_json);
+        // Check if we have space before adding
+        if (strlen(response) + strlen(tool_json) + 3 < max_len) {
+            strcat(response, tool_json);
         }
     }
     
-    strcat(tools_json, "]}");
-    return json_create_response(tools_json, response, max_len);
+    strcat(response, "]}");
+    return 0;  // Success - no need to call json_create_response since we built it directly
 }
 
 // Handle tools/call request
