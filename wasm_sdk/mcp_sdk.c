@@ -102,7 +102,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     log_info("MCP", "mcp_handle_request:About to check tools/list");
     if (wasm_strcmp(method, "tools/list") == 0) {
         log_info("MCP", "mcp_handle_request:Matched tools/list, checking state");
-        if (g_mcp_state != MCP_STATE_INITIALIZING) {
+        if (g_mcp_state != MCP_STATE_INITIALIZED) {
             log_info("MCP", "mcp_handle_request:Server not initialized, creating error");
             return json_create_error(-32002, "Server not initialized", response, max_len);
         }
@@ -164,7 +164,7 @@ static int32_t handle_initialized(char* response, int32_t max_len) {
     g_mcp_state = MCP_STATE_INITIALIZED;
     log_info("MCP", "Server initialized successfully");
     
-    // initialized is a notification, so no response content needed
+    // initialized is notification - return empty response (JSON-RPC 2.0 notifications have no response)
     response[0] = '\0';
     return 0;
 }

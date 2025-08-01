@@ -864,6 +864,26 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     ESP_LOGI(TAG, "Memory after successful MCP module load: free=%zu bytes, largest_block=%zu bytes", 
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     
+    // CRITICAL: Call _start() function to initialize the module and register tools
+    ESP_LOGI(TAG, "🔍 DEBUG: Looking for _start function to initialize module");
+    wasm_function_inst_t start_func = wasm_runtime_lookup_function(module->wasm_module_inst, "_start");
+    if (start_func) {
+        ESP_LOGI(TAG, "🔍 DEBUG: Found _start function, calling to register tools");
+        uint32_t argv[1] = {0}; // _start takes no parameters
+        bool start_success = wasm_runtime_call_wasm(module->exec_env, start_func, 0, argv);
+        if (start_success) {
+            ESP_LOGI(TAG, "✅ _start function called successfully - tools should be registered");
+        } else {
+            ESP_LOGW(TAG, "⚠️ _start function call failed - tools may not be registered");
+            const char* exception = wasm_runtime_get_exception(module->wasm_module_inst);
+            if (exception) {
+                ESP_LOGW(TAG, "⚠️ _start exception: %s", exception);
+            }
+        }
+    } else {
+        ESP_LOGW(TAG, "⚠️ No _start function found - tools will not be registered automatically");
+    }
+    
     // Debug: Dump all WASM exports to diagnose function lookup issues
     dump_wasm_exports(module->wasm_module, wasm_filename);
     
