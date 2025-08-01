@@ -64,14 +64,27 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     
     // Parse JSON-RPC request
     log_info("MCP", "mcp_handle_request: About to parse JSON");
+    
+    // TEST: Comment out json_parse_request and hardcode values
     if (json_parse_request(json_request, method, params, sizeof(params)) != 0) {
         log_error("MCP", "mcp_handle_request: JSON parse failed");
         return json_create_error(-32700, "Parse error", response, max_len);
     }
-
-    log_info("MCP - method: ", method);
     
-    log_info("MCP", "mcp_handle_request: JSON parsed successfully");
+    // Hardcode method for testing
+    //strcpy(method, "tools/list");
+    //params[0] = '\0';  // Empty params
+
+    //log_info("MCP - method: ", method);
+    
+    // Test with log_info2 - manual address handling
+    //log_info2((uint32_t)"mcp_handle_request:JSONparsedsuccessfully");
+    
+    // Test with log_info3 - length-based handling
+    //log_info3("mcp_handle_request:JSONparsedsuccessfully", 42);
+    
+    // Now test log_info after the others
+    log_info("MCP", "mcp_handle_request:JSON parsed successfully!");
     
     // Handle different MCP methods
     log_info("MCP", "mcp_handle_request: About to check initialize");
@@ -86,18 +99,18 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
         return handle_initialized(response, max_len);
     }
     
-    log_info("MCP", "mcp_handle_request: About to check tools/list");
+    log_info("MCP", "mcp_handle_request:About to check tools/list");
     if (wasm_strcmp(method, "tools/list") == 0) {
-        log_info("MCP", "mcp_handle_request: Matched tools/list, checking state");
+        log_info("MCP", "mcp_handle_request:Matched tools/list, checking state");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
-            log_info("MCP", "mcp_handle_request: Server not initialized, creating error");
+            log_info("MCP", "mcp_handle_request:Server not initialized, creating error");
             return json_create_error(-32002, "Server not initialized", response, max_len);
         }
-        log_info("MCP", "mcp_handle_request: Calling handle_tools_list");
+        log_info("MCP", "mcp_handle_request:Calling handle_tools_list");
         return handle_tools_list(response, max_len);
     }
     
-    log_info("MCP", "mcp_handle_request: About to check tools/call");
+    log_info("MCP", "mcp_handle_request:About to check tools/call");
     if (wasm_strcmp(method, "tools/call") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {

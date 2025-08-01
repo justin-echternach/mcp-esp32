@@ -201,6 +201,15 @@ void _start() {
 __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
     log_info("handle_mcp_request called", request);
+
+     //log_info2((uint32_t)"mcp_handle_request: JSON was parsed successfully");
+    
+    // Test with log_info3 - length-based handling
+    //log_info3("mcp_handle_request:JSON parsed successfully!", 45);
+    
+    // Now test log_info after the others
+    //log_info("MCP", "mcp_handle_request:JSONparsedsuccessfully");
+
     // Use the full MCP SDK pipeline to handle the request
     return mcp_handle_request(request, response, max_len);
 }

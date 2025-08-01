@@ -185,9 +185,20 @@ Create a complete MCP implementation where an LLM can control ESP32 LEDs through
 - [ ] Multiple tools work concurrently
 - [ ] Real-time LED control from LLM commands
 
+## String Handling Documentation
+For comprehensive information about WASM string literals and host function string conversion, see:
+**[WAMR ESP32 String Handling Guide](./wamr-esp32-string-handling.md)**
+
+This document covers:
+- String literal corruption issues and solutions
+- Host function signature patterns (`$`, `*`, `~`)
+- Function name collision problems (e.g., `strcmp` → `wasm_strcmp`)
+- Memory layout configuration for WAMR
+- String handling best practices and debugging
+
 ## Next Immediate Steps
-1. Fix `handle_mcp_request()` to use `mcp_handle_request()`
-2. Test tools/list response format
-3. Test tools/call with control_led
+1. Apply WAMR build configuration fixes (memory layout exports)
+2. Test complete MCP flow with working string handling
+3. Implement tools/call with control_led functionality
 4. Verify LED actually turns on/off
 5. Create comprehensive test suite

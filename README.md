@@ -33,3 +33,5 @@ They are not used or needed when building with CMake and idf.py.
 
 usbipd list
 usbipd attach --busid 2-2 --wsl
+
+Bash(. $HOME/esp/v5.5/esp-idf/export.sh && idf.py build)

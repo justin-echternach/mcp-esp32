@@ -744,8 +744,8 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     
     // Instantiate WASM module with adequate memory for MCP operations
-    uint32_t stack_size = 16384;  // Increased from 4KB to 16KB for MCP SDK operations
-    uint32_t heap_size = 16384;   // Increased from 4KB to 16KB for string operations and buffers
+    uint32_t stack_size = 4 * 1024;  // Increased from 4KB to 16KB for MCP SDK operations
+    uint32_t heap_size = 128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -1361,17 +1361,68 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 // Logging Functions
 static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
-    //ESP_LOGI(TAG, "🔍 LOG_INFO: Called with tag=%p, message=%p", tag, message);
+    // Validate pointers first
+    if (!tag || !message) {
+        printf("LOG_INFO: Invalid pointer - tag=%p, message=%p\n", tag, message);
+        return -1;
+    }
     
-    // Since we're using automatic conversion ($**), the pointers are already native pointers
-    // No validation needed - just direct access like json_parse_request
+    // Check reasonable string lengths (prevent runaway strings)
+    size_t tag_len = strnlen(tag, 64);      // Max 64 chars for tag
+    size_t msg_len = strnlen(message, 512); // Max 512 chars for message
     
-    //ESP_LOGI(TAG, "🔍 LOG_INFO: Tag content: '%.20s'", tag);
-    //ESP_LOGI(TAG, "🔍 LOG_INFO: Message content: '%.50s'", message);
+    // Debug: Show what we actually received
+    printf("LOG_INFO: tag_len=%zu, msg_len=%zu\n", tag_len, msg_len);
+    printf("LOG_INFO: tag='%.*s', message='%.*s'\n", (int)tag_len, tag, (int)msg_len, message);
+    
+    if (tag_len >= 64) {
+        printf("LOG_INFO: Tag too long (%zu chars)\n", tag_len);
+        return -1;
+    }
+    
+    if (msg_len >= 512) {
+        printf("LOG_INFO: Message too long (%zu chars)\n", msg_len);
+        return -1;
+    }
     
     ESP_LOGI(tag, "[WASM] %s", message);
-    //ESP_LOGI(TAG, "🔍 LOG_INFO: Successfully logged message");
     return 0;
+}
+
+
+
+// Your host function
+int32_t native_log_info2(wasm_exec_env_t exec_env, uint32_t str_offset) {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+    // Validate the string address first
+    if (!wasm_runtime_validate_app_str_addr(module_inst, str_offset)) {
+        printf("Invalid string address\n");
+        return -1;
+    }
+    
+    // Convert to native address
+    char *str = wasm_runtime_addr_app_to_native(module_inst, str_offset);
+    if (str) {
+        printf("Log2: %s\n", str);
+        return 0;
+    }
+    return -1;
+}
+
+
+
+int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
+    // str is already converted, len is the buffer size
+    if (str && len > 0) {
+        // Ensure null termination
+        char temp_buf[len + 1];
+        memcpy(temp_buf, str, len);
+        temp_buf[len] = '\0';
+        printf("Log3: %s\n", temp_buf);
+        return 0;
+    }
+    return -1;
 }
 
 static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
@@ -1396,8 +1447,27 @@ static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* s
 // Native strcmp implementation
 static int32_t native_strcmp(wasm_exec_env_t exec_env, const char* s1, const char* s2)
 {
-    ESP_LOGI("[WASM]", "strcmp called!");
-    // Using automatic string conversion ($$) - no validation needed
+    // Validate pointers first
+    if (!s1 || !s2) {
+        printf("STRCMP: Invalid pointer - s1=%p, s2=%p\n", s1, s2);
+        return -1;
+    }
+    
+    // Check reasonable string lengths (prevent runaway strings)
+    size_t len1 = strnlen(s1, 256);
+    size_t len2 = strnlen(s2, 256);  
+    
+    if (len1 >= 256) {
+        printf("STRCMP: String s1 too long (%zu chars)\n", len1);
+        return -1;
+    }
+    
+    if (len2 >= 256) {
+        printf("STRCMP: String s2 too long (%zu chars)\n", len2);
+        return -1;
+    }
+    
+    printf("[WASM]: strcmp called!\n");
     return strcmp(s1, s2);
 }
 
@@ -1514,6 +1584,11 @@ static NativeSymbol native_symbols[] = {
     
     // Logging
     {"log_info", native_log_info, "($$)i", NULL},
+    
+
+    {"log_info2", native_log_info2, "(i)i", NULL},
+    {"log_info3", native_log_info3, "(*~)i", NULL},
+
     {"log_error", native_log_error, "($$)i", NULL},
     
     // String Functions (C library compatibility)  
