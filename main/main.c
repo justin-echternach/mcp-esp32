@@ -711,9 +711,99 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
         return NULL;
     }
     
+    // DEBUGGING: Check WAMR compilation mode
+    ESP_LOGI(TAG, "🔍 WAMR Compilation Mode Check:");
+#ifdef WASM_ENABLE_INTERP
+    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_INTERP defined - Interpreter mode enabled");
+#else
+    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_INTERP not defined");
+#endif
+#ifdef WASM_ENABLE_FAST_INTERP
+    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_FAST_INTERP defined - Fast interpreter enabled");
+#else
+    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_FAST_INTERP not defined");
+#endif
+#ifdef WASM_ENABLE_AOT
+    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_AOT defined - AOT mode enabled");
+#else
+    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_AOT not defined");
+#endif
+#ifdef WASM_ENABLE_JIT
+    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_JIT defined - JIT mode enabled");
+#else
+    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_JIT not defined");
+#endif
+    
+    // DEBUGGING: Inspect WASM file buffer for target string BEFORE wasm_runtime_load
+    const char* target_string = "mcp_handle_request:About to check tools/list";
+    size_t target_len = strlen(target_string);
+    bool found_before = false;
+    size_t found_offset_before = 0;
+    
+    ESP_LOGI(TAG, "🔍 BEFORE wasm_runtime_load - Searching for string: '%s'", target_string);
+    ESP_LOGI(TAG, "🔍 File size: %ld bytes, searching for %zu byte string", file_size, target_len);
+    
+    for (size_t i = 0; i <= file_size - target_len; i++) {
+        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
+            found_before = true;
+            found_offset_before = i;
+            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer BEFORE load", i, i);
+            
+            // Show surrounding bytes
+            ESP_LOGI(TAG, "🔍 Surrounding bytes at offset 0x%zx:", i);
+            size_t start = (i >= 16) ? i - 16 : 0;
+            size_t end = (i + target_len + 16 < file_size) ? i + target_len + 16 : file_size;
+            
+            for (size_t j = start; j < end; j++) {
+                if (j == i) ESP_LOGI(TAG, "🔍   [TARGET START] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+                else if (j == i + target_len) ESP_LOGI(TAG, "🔍   [TARGET END] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+                else ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+            }
+            break;
+        }
+    }
+    
+    if (!found_before) {
+        ESP_LOGW(TAG, "🔍 String NOT found in file buffer before load");
+    }
+    
     // Load WASM module
     char error_buf[128];
+    ESP_LOGI(TAG, "🔍 Calling wasm_runtime_load...");
     module->wasm_module = wasm_runtime_load(wasm_file_buf, file_size, error_buf, sizeof(error_buf));
+    ESP_LOGI(TAG, "🔍 wasm_runtime_load returned: %p", module->wasm_module);
+    
+    // DEBUGGING: Inspect WASM file buffer for target string AFTER wasm_runtime_load
+    ESP_LOGI(TAG, "🔍 AFTER wasm_runtime_load - Searching for string: '%s'", target_string);
+    bool found_after = false;
+    size_t found_offset_after = 0;
+    
+    for (size_t i = 0; i <= file_size - target_len; i++) {
+        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
+            found_after = true;
+            found_offset_after = i;
+            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer AFTER load", i, i);
+            break;
+        }
+    }
+    
+    if (!found_after && found_before) {
+        ESP_LOGI(TAG, "🚨 STRING DISAPPEARED from file buffer after wasm_runtime_load!");
+        ESP_LOGI(TAG, "🚨 This confirms the issue: wasm_runtime_load modified the file buffer");
+        
+        // Check what's at the original location now
+        ESP_LOGI(TAG, "🔍 Checking what's at original offset 0x%zx now:", found_offset_before);
+        for (size_t j = found_offset_before; j < found_offset_before + target_len && j < file_size; j++) {
+            ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+        }
+    } else if (found_after && found_before && found_offset_after == found_offset_before) {
+        ESP_LOGI(TAG, "✅ String still present at same location after wasm_runtime_load");
+    } else if (found_after && found_before && found_offset_after != found_offset_before) {
+        ESP_LOGI(TAG, "🔄 String moved from 0x%zx to 0x%zx after wasm_runtime_load", found_offset_before, found_offset_after);
+    } else if (!found_before && !found_after) {
+        ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
+    }
+    
     free(wasm_file_buf);
     
     if (!module->wasm_module) {
@@ -745,7 +835,7 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     
     // Instantiate WASM module with adequate memory for MCP operations
     uint32_t stack_size = 4 * 1024;  // Increased from 4KB to 16KB for MCP SDK operations
-    uint32_t heap_size = 128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
+    uint32_t heap_size = 0; //128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -1361,6 +1451,8 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 // Logging Functions
 static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Validate pointers first
     if (!tag || !message) {
         printf("LOG_INFO: Invalid pointer - tag=%p, message=%p\n", tag, message);
@@ -1371,9 +1463,93 @@ static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const 
     size_t tag_len = strnlen(tag, 64);      // Max 64 chars for tag
     size_t msg_len = strnlen(message, 512); // Max 512 chars for message
     
-    // Debug: Show what we actually received
+    // WAMR Debugging: Get WASM addresses and validate them
+    uint64_t tag_wasm_addr = wasm_runtime_addr_native_to_app(module_inst, (void*)tag);
+    uint64_t msg_wasm_addr = wasm_runtime_addr_native_to_app(module_inst, (void*)message);
+    
+    // Check bounds checking status
     printf("LOG_INFO: tag_len=%zu, msg_len=%zu\n", tag_len, msg_len);
+    printf("LOG_INFO: tag_wasm_addr=0x%llx, msg_wasm_addr=0x%llx\n", 
+           (unsigned long long)tag_wasm_addr, (unsigned long long)msg_wasm_addr);
+    
+    // Validate string addresses in WAMR
+    bool tag_valid = wasm_runtime_validate_app_str_addr(module_inst, tag_wasm_addr);
+    bool msg_valid = wasm_runtime_validate_app_str_addr(module_inst, msg_wasm_addr);
+    printf("LOG_INFO: tag_valid=%d, msg_valid=%d\n", tag_valid, msg_valid);
+    
+    // Debug: Show what we actually received
     printf("LOG_INFO: tag='%.*s', message='%.*s'\n", (int)tag_len, tag, (int)msg_len, message);
+    
+    // Raw memory inspection for failing strings
+    if (msg_len == 0) {
+        printf("LOG_INFO: EMPTY STRING DETECTED - Inspecting raw memory\n");
+        
+        // Get native pointer and inspect raw bytes
+        void* native_ptr = wasm_runtime_addr_app_to_native(module_inst, msg_wasm_addr);
+        printf("LOG_INFO: Native ptr for msg_wasm_addr 0x%llx = %p\n", 
+               (unsigned long long)msg_wasm_addr, native_ptr);
+        
+        if (native_ptr) {
+            unsigned char* bytes = (unsigned char*)native_ptr;
+            printf("LOG_INFO: Raw bytes at 0x%llx: ", (unsigned long long)msg_wasm_addr);
+            for (int i = 0; i < 40; i++) {
+                printf("%02x ", bytes[i]);
+                if (i % 16 == 15) printf("| ");
+            }
+            printf("\n");
+            
+            // Also show as characters
+            printf("LOG_INFO: As chars: '");
+            for (int i = 0; i < 40; i++) {
+                char c = bytes[i];
+                if (c == 0) {
+                    printf("\\0");
+                    break;
+                } else if (isprint(c)) {
+                    printf("%c", c);
+                } else {
+                    printf("\\x%02x", (unsigned char)c);
+                }
+            }
+            printf("'\n");
+            
+            // Check if it's just a null terminator at the start
+            if (bytes[0] == 0) {
+                printf("LOG_INFO: String starts with null terminator - truly empty\n");
+                
+                // Get WAMR memory layout information
+                printf("=== WAMR MEMORY LAYOUT DEBUG ===\n");
+                
+                // Use basic information we can get
+                uint32_t total_memory = 65536; // Known WASM memory size
+                printf("MEMORY: total_size=%lu bytes (0x%lx)\n", 
+                       (unsigned long)total_memory, (unsigned long)total_memory);
+                    
+                // Check where our problem addresses fall
+                printf("PROBLEM ADDRESSES:\n");
+                printf("  0x814 = %u decimal (in first %u bytes)\n", 0x814, 0x814);
+                printf("  0x9cb = %u decimal (in first %u bytes)\n", 0x9cb, 0x9cb);
+                    
+                // Show memory regions (estimated)
+                printf("ESTIMATED MEMORY REGIONS:\n");
+                printf("  Data section: 0x0 - ~0x2000 (0-8192)\n");
+                printf("  Stack region: ~0x2000 - ~0x6000 (8192-24576) [4KB stack]\n");
+                printf("  Heap region: ~0x6000+ (24576+) [4KB heap]\n");
+                
+                if (0x814 < 8192) {
+                    printf("  >> 0x814 is in DATA SECTION - should contain strings!\n");
+                }
+                if (0x9cb < 8192) {
+                    printf("  >> 0x9cb is in DATA SECTION - should contain strings!\n");
+                }
+                
+                printf("=== END MEMORY LAYOUT DEBUG ===\n");
+            }
+        } else {
+            printf("LOG_INFO: Failed to get native pointer for WASM address 0x%llx\n", 
+                   (unsigned long long)msg_wasm_addr);
+        }
+    }
     
     if (tag_len >= 64) {
         printf("LOG_INFO: Tag too long (%zu chars)\n", tag_len);

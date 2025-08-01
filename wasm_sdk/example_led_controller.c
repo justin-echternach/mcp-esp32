@@ -202,13 +202,13 @@ __attribute__((export_name("handle_mcp_request")))
 int32_t handle_mcp_request(const char* request, char* response, int32_t max_len) {
     log_info("handle_mcp_request called", request);
 
-     //log_info2((uint32_t)"mcp_handle_request: JSON was parsed successfully");
+    // CRITICAL TEST: Direct string literal access to problematic strings
+    const char* test_str1 = "mcp_handle_request:About to check tools/list";
+    const char* test_str2 = "mcp_handle_request:Matched tools/list, checking state";
     
-    // Test with log_info3 - length-based handling
-    //log_info3("mcp_handle_request:JSON parsed successfully!", 45);
-    
-    // Now test log_info after the others
-    //log_info("MCP", "mcp_handle_request:JSONparsedsuccessfully");
+    log_info("DIRECT_TEST1", test_str1);
+    log_info("DIRECT_TEST2", test_str2);
+    log_info("TEST", "Direct string access test completed");
 
     // Use the full MCP SDK pipeline to handle the request
     return mcp_handle_request(request, response, max_len);

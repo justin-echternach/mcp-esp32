@@ -22,11 +22,14 @@ fi
     --target=wasm32-wasi \
     -O3 \
     -z stack-size=4096 \
-    -Wl,--initial-memory=131072 \
+    -Wl,--initial-memory=65536 \
     -nostdlib \
     -Wl,--no-entry \
     -Wl,--export=handle_mcp_request \
     -Wl,--export=_start \
+    -Wl,--export=__data_end \
+    -Wl,--export=__heap_base \
+    -Wl,--global-base=4096 \
     -Wl,--strip-all \
     -Wl,--allow-undefined \
     -o wasm/led_ctrl.was \
