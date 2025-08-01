@@ -834,7 +834,7 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     
     // Instantiate WASM module with adequate memory for MCP operations
-    uint32_t stack_size = 4 * 1024;  // Increased from 4KB to 16KB for MCP SDK operations
+    uint32_t stack_size = 32 * 1024;  // Increased to 32KB to fix auxiliary stack overflow
     uint32_t heap_size = 0; //128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     

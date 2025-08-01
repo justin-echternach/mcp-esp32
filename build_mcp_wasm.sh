@@ -21,7 +21,7 @@ fi
 "$WASI_SDK_PATH/bin/clang" \
     --target=wasm32-wasi \
     -O3 \
-    -z stack-size=4096 \
+    -z stack-size=32768 \
     -Wl,--initial-memory=65536 \
     -nostdlib \
     -Wl,--no-entry \
