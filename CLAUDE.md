@@ -289,10 +289,17 @@ idf.py build
 
 ## References
 
+### Project Documentation
+- **[wamr-troubleshooting-guide.md](wamr-troubleshooting-guide.md)** - Complete guide to major issues and solutions  
+- **[wamr-esp32-string-handling.md](wamr-esp32-string-handling.md)** - Detailed string handling analysis
+- **[docs/mcp_architecture.md](docs/mcp_architecture.md)** - MCP protocol implementation
+
+### External References
 - **WAMR Documentation**: `/home/jechternach/src/esp32/wasm-micro-runtime/`
 - **ESP-IDF GPIO Guide**: https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html
 - **MCP Specification**: https://spec.modelcontextprotocol.io/specification/
 - **WASI SDK**: https://github.com/WebAssembly/wasi-sdk
+- **WAMR Auxiliary Stack Issue**: https://github.com/bytecodealliance/wasm-micro-runtime/issues/3071
 
 ## Development Notes for Future Claude Instances
 
