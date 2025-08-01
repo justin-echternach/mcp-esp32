@@ -1435,9 +1435,9 @@ static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char*
 
 static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
 {
-    // Using automatic string conversion (i$*i) - message is auto-converted, response is manual pointer
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)response, max_len)) {
+    // Using buffer + length signature (i$*~) - safer parameter handling
+    if (!response || max_len <= 0) {
+        printf("ERROR: Invalid response buffer parameters\n");
         return -1;
     }
     
@@ -1445,6 +1445,7 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%ld,\"message\":\"%s\"},\"id\":1}",
         (long)code, message);
     
+    printf("JSON_CREATE_ERROR: Created error response (%d bytes): %.100s...\n", len, response);
     return len < max_len ? 0 : -2; // Buffer overflow
 }
 
@@ -1756,7 +1757,7 @@ static NativeSymbol native_symbols[] = {
     // JSON Helper Functions
     {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
     {"json_create_response", native_json_create_response, "($*i)i", NULL},
-    {"json_create_error", native_json_create_error, "(i$*i)i", NULL},
+    {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
     
     // Logging
     {"log_info", native_log_info, "($$)i", NULL},
