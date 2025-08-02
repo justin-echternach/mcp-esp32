@@ -30,6 +30,9 @@ static int32_t handle_initialized(char* response, int32_t max_len);
 static int32_t handle_tools_list(char* response, int32_t max_len);
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len);
 static int atoi(const char* str);
+static int32_t extract_json_id(const char* json);
+static int32_t create_jsonrpc_response(const char* result, char* response, int32_t max_len);
+static int32_t create_jsonrpc_error(int32_t code, const char* message, char* response, int32_t max_len);
 
 // Global state - using heap-allocated strings
 static char* g_server_name = NULL;
@@ -37,6 +40,7 @@ static char* g_server_version = NULL;
 static mcp_tool_t* g_tools = NULL;  // Heap-allocated tools array
 static int g_tool_count = 0;
 static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
+static int32_t g_current_request_id = 0;  // Store current JSON-RPC request ID
 
 // Initialize MCP server
 int32_t mcp_server_init(const char* server_name, const char* version) {
@@ -152,8 +156,12 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     // TEST: Comment out json_parse_request and hardcode values
     if (json_parse_request(json_request, method, params, sizeof(params)) != 0) {
         log_error("MCP", "mcp_handle_request: JSON parse failed");
-        return json_create_error(-32700, "Parse error", response, max_len);
+        g_current_request_id = 0; // Default ID for parse errors
+        return create_jsonrpc_error(-32700, "Parse error", response, max_len);
     }
+    
+    // Extract the JSON-RPC ID after successful parse
+    g_current_request_id = extract_json_id(json_request);
     
     // Hardcode method for testing
     //strcpy(method, "tools/list");
@@ -178,7 +186,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     }
     
     log_info("MCP", "mcp_handle_request: About to check initialized");
-    if (wasm_strcmp(method, "initialized") == 0) {
+    if (wasm_strcmp(method, "notifications/initialized") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialized");
         return handle_initialized(response, max_len);
     }
@@ -188,7 +196,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
         log_info("MCP", "mcp_handle_request:Matched tools/list, checking state");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             log_info("MCP", "mcp_handle_request:Server not initialized, creating error");
-            return json_create_error(-32002, "Server not initialized", response, max_len);
+            return create_jsonrpc_error(-32002, "Server not initialized", response, max_len);
         }
         log_info("MCP", "mcp_handle_request:Calling handle_tools_list");
         return handle_tools_list(response, max_len);
@@ -198,7 +206,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     if (wasm_strcmp(method, "tools/call") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
-            return json_create_error(-32002, "Server not initialized", response, max_len);
+            return create_jsonrpc_error(-32002, "Server not initialized", response, max_len);
         }
         return handle_tools_call(params, response, max_len);
     } 
@@ -206,11 +214,11 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     log_info("MCP", "mcp_handle_request: About to check ping");
     if (wasm_strcmp(method, "ping") == 0) {
         log_info("MCP", "mcp_handle_request: Calling ping handler");
-        return json_create_response("{\"message\":\"pong\"}", response, max_len);
+        return create_jsonrpc_response("{\"message\":\"pong\"}", response, max_len);
     }
     
     log_error("MCP", "mcp_handle_request: Unknown method");
-    return json_create_error(-32601, "Method not found", response, max_len);
+    return create_jsonrpc_error(-32601, "Method not found", response, max_len);
 }
 
 // Handle initialize request
@@ -231,7 +239,7 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
     const char* server_version = g_server_version ? g_server_version : "1.0.0";
     
     snprintf(result, sizeof(result),
-        "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{"
+        "{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{"
         "\"tools\":{\"listChanged\":false},"
         "\"resources\":{\"subscribe\":false,\"listChanged\":false},"
         "\"prompts\":{\"listChanged\":false},"
@@ -241,13 +249,19 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
     
     log_info("MCP", "handle_initialize: JSON created, about to call json_create_response");
     log_info("MCP", "Initialize request received");
-    return json_create_response(result, response, max_len);
+    
+    // Create response with correct ID
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":%d}",
+        result, g_current_request_id);
+    
+    return len < max_len ? 0 : -2;
 }
 
 // Handle initialized notification
 static int32_t handle_initialized(char* response, int32_t max_len) {
     if (g_mcp_state != MCP_STATE_INITIALIZING) {
-        return json_create_error(-32002, "Server not in initializing state", response, max_len);
+        return create_jsonrpc_error(-32002, "Server not in initializing state", response, max_len);
     }
     
     g_mcp_state = MCP_STATE_INITIALIZED;
@@ -261,7 +275,7 @@ static int32_t handle_initialized(char* response, int32_t max_len) {
 // Handle tools/list request
 static int32_t handle_tools_list(char* response, int32_t max_len) {
     if (!g_tools) {
-        return json_create_error(-32003, "Tools array not allocated", response, max_len);
+        return create_jsonrpc_error(-32003, "Tools array not allocated", response, max_len);
     }
     
     // Log the tool count to debug missing 4th tool
@@ -290,13 +304,22 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     }
     
     strcat(response, "]}");
-    return 0;  // Success - no need to call json_create_response since we built it directly
+    
+    // Wrap in JSON-RPC response with correct ID
+    char tools_result[2048];
+    strcpy(tools_result, response);
+    
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":%d}",
+        tools_result, g_current_request_id);
+    
+    return len < max_len ? 0 : -2;
 }
 
 // Handle tools/call request
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len) {
     if (!g_tools) {
-        return json_create_error(-32003, "Tools array not allocated", response, max_len);
+        return create_jsonrpc_error(-32003, "Tools array not allocated", response, max_len);
     }
     
     char tool_name[64];
@@ -304,7 +327,7 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
     
     // Parse tool name from params
     if (mcp_parse_string_param(params, "name", tool_name, sizeof(tool_name)) != 0) {
-        return json_create_error(-32602, "Missing tool name", response, max_len);
+        return create_jsonrpc_error(-32602, "Missing tool name", response, max_len);
     }
     
     // Parse tool arguments (if any)
@@ -320,14 +343,14 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
             if (result.code == 0) {
                 // Send SSE event for successful tool execution
                 sse_send_tool_result(tool_name, result.data);
-                return json_create_response(result.data, response, max_len);
+                return create_jsonrpc_response(result.data, response, max_len);
             } else {
-                return json_create_error(result.code, result.message, response, max_len);
+                return create_jsonrpc_error(result.code, result.message, response, max_len);
             }
         }
     }
     
-    return json_create_error(-32601, "Tool not found", response, max_len);
+    return create_jsonrpc_error(-32601, "Tool not found", response, max_len);
 }
 
 // Helper: Create success result
@@ -421,6 +444,69 @@ int32_t mcp_create_json_string(const char* key, const char* value, char* json, i
 
 int32_t mcp_create_json_bool(const char* key, bool value, char* json, int32_t max_len) {
     return snprintf(json, max_len, "{\"%s\":%s}", key, value ? "true" : "false");
+}
+
+// Extract JSON-RPC ID from request
+static int32_t extract_json_id(const char* json) {
+    log_info("MCP", "extract_json_id: Starting");
+    
+    const char* id_start = strstr(json, "\"id\"");
+    if (!id_start) {
+        log_info("MCP", "extract_json_id: No id found");
+        return 0; // Default to 0 if no ID found
+    }
+    
+    log_info("MCP", "extract_json_id: Found id field");
+    
+    // Log the pointer address returned by strstr
+    char addr_msg[64];
+    snprintf(addr_msg, sizeof(addr_msg), "extract_json_id: id_start addr=0x%x", (uint32_t)id_start);
+    log_info("MCP", addr_msg);
+    
+    // Add bounds check - don't go more than 10 chars looking for ':'
+    int search_limit = 10;
+    while (*id_start && *id_start != ':' && search_limit > 0) {
+        log_info("MCP", "extract_json_id: Searching for colon");
+        char debug_msg[64];
+        snprintf(debug_msg, sizeof(debug_msg), "extract_json_id: char='%c' limit=%d", *id_start, search_limit);
+        log_info("MCP", debug_msg);
+        id_start++;
+        search_limit--;
+    }
+    if (!*id_start || search_limit == 0) {
+        log_info("MCP", "extract_json_id: No colon found");
+        return 0;
+    }
+
+    log_info("MCP", "extract_json_id: Found colon, about to parse number");
+    
+    id_start++; // Skip ':'
+    // Skip whitespace
+    while (*id_start && (*id_start == ' ' || *id_start == '\t' || *id_start == '\n')) {
+        log_info("MCP", "extract_json_id: Skipping whitespace");
+        id_start++;
+    }
+    
+    log_info("MCP", "extract_json_id: About to parse number");
+    
+    // Parse the ID (assuming it's a number)
+    return atoi(id_start);
+}
+
+// Create JSON-RPC response with correct ID
+static int32_t create_jsonrpc_response(const char* result, char* response, int32_t max_len) {
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":%d}",
+        result, g_current_request_id);
+    return len < max_len ? 0 : -2;
+}
+
+// Create JSON-RPC error with correct ID
+static int32_t create_jsonrpc_error(int32_t code, const char* message, char* response, int32_t max_len) {
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%d}",
+        code, message, g_current_request_id);
+    return len < max_len ? 0 : -2;
 }
 
 // Simple atoi implementation (if not available)

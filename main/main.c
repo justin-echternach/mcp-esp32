@@ -1707,9 +1707,18 @@ static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const voi
 // Native strstr implementation
 static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, const char* needle)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Using automatic string conversion ($$) - no validation needed
     char* result = strstr(haystack, needle);
-    return result ? (uint32_t)result : 0; // Return WASM address or 0 if not found
+    
+    if (!result) {
+        return 0; // Not found
+    }
+    
+    // Convert host pointer back to WASM address
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, result);
+    return wasm_addr;
 }
 
 // Native malloc implementation
