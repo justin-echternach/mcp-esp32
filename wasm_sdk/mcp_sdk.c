@@ -1,14 +1,23 @@
 #include "mcp_sdk.h"
 
+// Define NULL since we're using -nostdlib
+#ifndef NULL
+#define NULL ((void*)0)
+#endif
+
 // Host-provided string functions (don't use standard library)
 // Use standard signatures to avoid compiler warnings
 extern int wasm_strcmp(const char* s1, const char* s2);
 extern unsigned long strlen(const char* s);
 extern char* strcat(char* dest, const char* src);
 extern char* strcpy(char* dest, const char* src);
-extern char* strncpy(char* dest, const char* src, unsigned long n);
+extern char* wasm_strncpy(char* dest, const char* src, unsigned long n);
 extern char* strstr(const char* haystack, const char* needle);
 extern int strncmp(const char* s1, const char* s2, unsigned long n);
+
+// Host-provided memory allocation functions
+extern void* malloc(unsigned long size);
+extern void free(void* ptr);
 
 // Host-provided formatting function
 extern int snprintf(char* buffer, unsigned long size, const char* format, ...);
@@ -22,9 +31,9 @@ static int32_t handle_tools_list(char* response, int32_t max_len);
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len);
 static int atoi(const char* str);
 
-// Global state
-static char g_server_name[64] = "";
-static char g_server_version[16] = "";
+// Global state - using heap-allocated strings
+static char* g_server_name = NULL;
+static char* g_server_version = NULL;
 static mcp_tool_t g_tools[16];  // Max 16 tools per module
 static int g_tool_count = 0;
 static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
@@ -38,13 +47,41 @@ int32_t mcp_server_init(const char* server_name, const char* version) {
         return -1;
     }
     
-    log_info("MCP", "mcp_server_init: About to copy server name");
-    strncpy(g_server_name, server_name, sizeof(g_server_name) - 1);
-    log_info("MCP", "mcp_server_init: Server name copied");
+    // Free existing allocations if any
+    if (g_server_name) {
+        free(g_server_name);
+        g_server_name = NULL;
+    }
+    if (g_server_version) {
+        free(g_server_version);
+        g_server_version = NULL;
+    }
     
-    log_info("MCP", "mcp_server_init: About to copy version");
-    strncpy(g_server_version, version, sizeof(g_server_version) - 1);
-    log_info("MCP", "mcp_server_init: Version copied");
+    log_info("MCP", "mcp_server_init: About to allocate server name");
+    g_server_name = malloc(64);
+    if (!g_server_name) {
+        log_info("MCP", "mcp_server_init: Failed to allocate server name");
+        return -1;
+    }
+    
+    log_info("MCP", "mcp_server_init: About to allocate version");
+    g_server_version = malloc(16);
+    if (!g_server_version) {
+        log_info("MCP", "mcp_server_init: Failed to allocate version");
+        free(g_server_name);
+        g_server_name = NULL;
+        return -1;
+    }
+    
+    log_info("MCP", "mcp_server_init: About to copy server name to heap");
+    wasm_strncpy(g_server_name, server_name, 63);
+    g_server_name[63] = '\0';
+    log_info("MCP", "mcp_server_init: Server name copied to heap");
+    
+    log_info("MCP", "mcp_server_init: About to copy version to heap");
+    wasm_strncpy(g_server_version, version, 15);
+    g_server_version[15] = '\0';
+    log_info("MCP", "mcp_server_init: Version copied to heap");
     
     g_tool_count = 0;
     log_info("MCP", "mcp_server_init: Tool count reset");
@@ -167,6 +204,11 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
     
     log_info("MCP", "handle_initialize: About to create result JSON");
     char result[512];
+    
+    // Use heap-allocated globals or fallback to hardcoded values
+    const char* server_name = g_server_name ? g_server_name : "led_controller";
+    const char* server_version = g_server_version ? g_server_version : "1.0.0";
+    
     snprintf(result, sizeof(result),
         "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{"
         "\"tools\":{\"listChanged\":false},"
@@ -174,7 +216,7 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
         "\"prompts\":{\"listChanged\":false},"
         "\"logging\":{}},"
         "\"serverInfo\":{\"name\":\"%s\",\"version\":\"%s\"}}",
-        g_server_name, g_server_version);
+        server_name, server_version);
     
     log_info("MCP", "handle_initialize: JSON created, about to call json_create_response");
     log_info("MCP", "Initialize request received");
@@ -279,7 +321,7 @@ mcp_result_t mcp_success(const char* data) {
     mcp_result_t result;
     result.code = 0;
     strcpy(result.message, "Success");
-    strncpy(result.data, data ? data : "{}", sizeof(result.data) - 1);
+    wasm_strncpy(result.data, data ? data : "{}", sizeof(result.data) - 1);
     return result;
 }
 
@@ -287,7 +329,7 @@ mcp_result_t mcp_success(const char* data) {
 mcp_result_t mcp_error(int32_t code, const char* message) {
     mcp_result_t result;
     result.code = code;
-    strncpy(result.message, message ? message : "Unknown error", sizeof(result.message) - 1);
+    wasm_strncpy(result.message, message ? message : "Unknown error", sizeof(result.message) - 1);
     strcpy(result.data, "null");
     return result;
 }

@@ -835,7 +835,7 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     
     // Instantiate WASM module with adequate memory for MCP operations
     uint32_t stack_size = 64 * 1024;  // Increased to 64KB to fix auxiliary stack overflow
-    uint32_t heap_size = 0; //128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
+    uint32_t heap_size = 128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
     module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
     
     if (!module->wasm_module_inst) {
@@ -1680,10 +1680,10 @@ static int32_t native_strlen(wasm_exec_env_t exec_env, const char* s)
 static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n)
 {
     // Using automatic string conversion ($*i) - src is auto-converted, dest is manual pointer
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n)) {
-        return 0; // Return 0 on validation failure
-    }
+    // wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    // if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n)) {
+    //     return 0; // Return 0 on validation failure
+    // }
     
     strncpy(dest, src, n);
     return (uint32_t)dest; // Return WASM address
@@ -1692,12 +1692,7 @@ static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* 
 // Native memcpy implementation  
 static int32_t native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src, int32_t n)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)src, n)) {
-        return 0; // Return 0 on validation failure
-    }
-    
+    // Using automatic pointer conversion (**i) - no validation needed
     memcpy(dest, src, n);
     return (uint32_t)dest; // Return WASM address
 }
@@ -1705,12 +1700,7 @@ static int32_t native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* s
 // Native memcmp implementation
 static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n)
 {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)s1, n) ||
-        !wasm_runtime_validate_app_addr(module_inst, (uint32_t)s2, n)) {
-        return 0; // Return 0 on validation failure
-    }
-    
+    // Using automatic pointer conversion (**i) - no validation needed
     return memcmp(s1, s2, n);
 }
 
@@ -1720,6 +1710,41 @@ static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, con
     // Using automatic string conversion ($$) - no validation needed
     char* result = strstr(haystack, needle);
     return result ? (uint32_t)result : 0; // Return WASM address or 0 if not found
+}
+
+// Native malloc implementation
+static uint32_t native_malloc(wasm_exec_env_t exec_env, uint32_t size)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+    ESP_LOGI("native_malloc", "Allocating %u bytes", size);
+    
+    // Use WAMR's module malloc function
+    uint32_t wasm_addr = wasm_runtime_module_malloc(module_inst, size, NULL);
+    
+    if (wasm_addr == 0) {
+        ESP_LOGE("native_malloc", "Failed to allocate %u bytes", size);
+    } else {
+        ESP_LOGI("native_malloc", "Allocated %u bytes at WASM address 0x%x", size, wasm_addr);
+    }
+    
+    return wasm_addr;
+}
+
+// Native free implementation  
+static void native_free(wasm_exec_env_t exec_env, uint32_t ptr)
+{
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+    ESP_LOGI("native_free", "Freeing WASM address 0x%x", ptr);
+    
+    if (ptr == 0) {
+        ESP_LOGW("native_free", "Attempting to free NULL pointer");
+        return;
+    }
+    
+    // Use WAMR's module free function
+    wasm_runtime_module_free(module_inst, ptr);
 }
 
 // Native strcpy implementation
@@ -1794,11 +1819,15 @@ static NativeSymbol native_symbols[] = {
     {"strlen", native_strlen, "($)i", NULL},
     {"strcat", native_strcat, "($$)i", NULL},
     {"strcpy", native_strcpy, "($*)i", NULL},
-    {"strncpy", native_strncpy, "($*i)i", NULL},
+    {"wasm_strncpy", native_strncpy, "($*i)i", NULL},
     {"strncmp", native_strncmp, "($$i)i", NULL},
     {"memcpy", native_memcpy, "(**i)i", NULL},
     {"memcmp", native_memcmp, "(**i)i", NULL},
-    {"strstr", native_strstr, "($$)i", NULL}
+    {"strstr", native_strstr, "($$)i", NULL},
+    
+    // Memory allocation functions
+    {"malloc", native_malloc, "(i)i", NULL},
+    {"free", native_free, "(*)v", NULL}
     // Note: snprintf removed - too complex for WAMR (variadic function)
 };
 
