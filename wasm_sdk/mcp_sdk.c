@@ -211,6 +211,13 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
         return handle_tools_call(params, response, max_len);
     } 
     
+    log_info("MCP", "mcp_handle_request: About to check prompts/list");
+    if (wasm_strcmp(method, "prompts/list") == 0) {
+        log_info("MCP", "mcp_handle_request: Calling prompts/list handler");
+        // Return empty prompts array - we don't implement prompts
+        return create_jsonrpc_response("{\"prompts\":[]}", response, max_len);
+    }
+    
     log_info("MCP", "mcp_handle_request: About to check ping");
     if (wasm_strcmp(method, "ping") == 0) {
         log_info("MCP", "mcp_handle_request: Calling ping handler");
