@@ -1738,13 +1738,14 @@ static void native_free(wasm_exec_env_t exec_env, uint32_t ptr)
     
     ESP_LOGI("native_free", "Freeing WASM address 0x%x", ptr);
     
-    if (ptr == 0) {
-        ESP_LOGW("native_free", "Attempting to free NULL pointer");
-        return;
-    }
+    // if (ptr == 0) {
+    //     ESP_LOGW("native_free", "Attempting to free NULL pointer");
+    //     return 0;
+    // }
     
     // Use WAMR's module free function
     wasm_runtime_module_free(module_inst, ptr);
+    //return 0;
 }
 
 // Native strcpy implementation
@@ -1827,7 +1828,7 @@ static NativeSymbol native_symbols[] = {
     
     // Memory allocation functions
     {"malloc", native_malloc, "(i)i", NULL},
-    {"free", native_free, "(*)v", NULL}
+    {"free", native_free, "(*)", NULL}
     // Note: snprintf removed - too complex for WAMR (variadic function)
 };
 
