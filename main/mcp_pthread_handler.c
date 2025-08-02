@@ -186,13 +186,27 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
              module, module->wasm_module, module->wasm_module_inst);
     ESP_LOGI(TAG, "🔍 DEBUG: Module has exec_env: %p", module->exec_env);
     
-    // Look for MCP request handler function
+    // Look for MCP request handler function with retry mechanism for timing issues
     ESP_LOGI(TAG, "🔍 DEBUG: About to lookup function in pthread context");
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
-    ESP_LOGI(TAG, "🔍 DEBUG: Function lookup returned: %p", handle_request_func);
+    wasm_function_inst_t handle_request_func = NULL;
+    int retry_count = 0;
+    const int max_retries = 5;
+    
+    while (!handle_request_func && retry_count < max_retries) {
+        handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
+        ESP_LOGI(TAG, "🔍 DEBUG: Function lookup attempt %d returned: %p", retry_count + 1, handle_request_func);
+        
+        if (!handle_request_func) {
+            retry_count++;
+            if (retry_count < max_retries) {
+                ESP_LOGW(TAG, "🔍 DEBUG: Function lookup failed, retrying in 10ms (attempt %d/%d)", retry_count, max_retries);
+                vTaskDelay(pdMS_TO_TICKS(10)); // Wait 10ms before retry
+            }
+        }
+    }
     
     if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function", wasm_filename);
+        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function after %d retries", wasm_filename, max_retries);
         ESP_LOGE(TAG, "🔍 DEBUG: Lookup failed - module_inst still: %p", module->wasm_module_inst);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");
