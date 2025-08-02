@@ -70,6 +70,9 @@ static volatile bool g_led_state = false;
 static volatile bool g_led_state_changed = false;
 static SemaphoreHandle_t g_led_state_mutex = NULL;
 
+// Control variable for LED blink loop
+static bool g_led_blink_enabled = false;
+
 // Forward declaration for WASM functions
 static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv);
 static void register_mcp_endpoints(httpd_handle_t server);
@@ -2235,6 +2238,12 @@ main_loop:
     }
     
     while (1) {
+        // Check if LED blinking is enabled
+        if (!g_led_blink_enabled) {
+            vTaskDelay(1000 / portTICK_PERIOD_MS);  // Sleep for 1 second when disabled
+            continue;
+        }
+        
         led_state = !led_state;
         
         if (g_wasm_available && g_exec_env && g_wasm_module_inst) {

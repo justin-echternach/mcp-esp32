@@ -369,8 +369,32 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
         return create_jsonrpc_error(-32602, "Missing tool name", response, max_len);
     }
     
-    // Parse tool arguments (if any)
-    if (mcp_parse_string_param(params, "arguments", tool_params, sizeof(tool_params)) != 0) {
+    // Parse tool arguments (extract JSON object for "arguments")
+    const char* args_start = strstr(params, "\"arguments\":");
+    if (args_start) {
+        args_start += strlen("\"arguments\":");
+        // Skip whitespace
+        while (*args_start == ' ' || *args_start == '\t') args_start++;
+        
+        // Find the matching closing brace for the arguments object
+        if (*args_start == '{') {
+            int brace_count = 1;
+            const char* p = args_start + 1;
+            char* dest = tool_params;
+            *dest++ = '{';
+            
+            while (*p && brace_count > 0 && (dest - tool_params) < (sizeof(tool_params) - 2)) {
+                if (*p == '{') brace_count++;
+                else if (*p == '}') brace_count--;
+                *dest++ = *p;
+                if (brace_count == 0) break;
+                p++;
+            }
+            *dest = '\0';
+        } else {
+            strcpy(tool_params, "{}");
+        }
+    } else {
         strcpy(tool_params, "{}"); // Default empty arguments
     }
     
@@ -382,9 +406,20 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
             if (result.code == 0) {
                 // Send SSE event for successful tool execution
                 sse_send_tool_result(tool_name, result.data);
-                return create_jsonrpc_response(result.data, response, max_len);
+                
+                // Format response according to MCP spec
+                char mcp_result[1024];
+                snprintf(mcp_result, sizeof(mcp_result),
+                    "{\"content\":[{\"type\":\"text\",\"text\":%s}],\"isError\":false}",
+                    result.data);
+                return create_jsonrpc_response(mcp_result, response, max_len);
             } else {
-                return create_jsonrpc_error(result.code, result.message, response, max_len);
+                // Format error response according to MCP spec
+                char mcp_error[512];
+                snprintf(mcp_error, sizeof(mcp_error),
+                    "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],\"isError\":true}",
+                    result.message);
+                return create_jsonrpc_response(mcp_error, response, max_len);
             }
         }
     }
