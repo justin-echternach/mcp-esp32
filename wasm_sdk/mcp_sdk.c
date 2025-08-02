@@ -31,11 +31,23 @@ static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
 
 // Initialize MCP server
 int32_t mcp_server_init(const char* server_name, const char* version) {
-    if (!server_name || !version) return -1;
+    log_info("MCP", "mcp_server_init: Starting");
     
+    if (!server_name || !version) {
+        log_info("MCP", "mcp_server_init: Invalid parameters");
+        return -1;
+    }
+    
+    log_info("MCP", "mcp_server_init: About to copy server name");
     strncpy(g_server_name, server_name, sizeof(g_server_name) - 1);
+    log_info("MCP", "mcp_server_init: Server name copied");
+    
+    log_info("MCP", "mcp_server_init: About to copy version");
     strncpy(g_server_version, version, sizeof(g_server_version) - 1);
+    log_info("MCP", "mcp_server_init: Version copied");
+    
     g_tool_count = 0;
+    log_info("MCP", "mcp_server_init: Tool count reset");
     
     log_info("MCP", "Server initialized");
     return 0;
@@ -43,10 +55,24 @@ int32_t mcp_server_init(const char* server_name, const char* version) {
 
 // Register a tool
 int32_t mcp_register_tool(const mcp_tool_t* tool) {
-    if (!tool || g_tool_count >= 16) return -1;
+    log_info("MCP", "mcp_register_tool: Starting");
     
+    if (!tool) {
+        log_info("MCP", "mcp_register_tool: NULL tool");
+        return -1;
+    }
+    
+    if (g_tool_count >= 16) {
+        log_info("MCP", "mcp_register_tool: Too many tools");
+        return -1;
+    }
+    
+    log_info("MCP", "mcp_register_tool: About to copy tool");
     g_tools[g_tool_count] = *tool;
+    log_info("MCP", "mcp_register_tool: Tool copied");
+    
     g_tool_count++;
+    log_info("MCP", "mcp_register_tool: Tool count incremented");
     
     char msg[128];
     snprintf(msg, sizeof(msg), "Registered tool: %s", tool->name);

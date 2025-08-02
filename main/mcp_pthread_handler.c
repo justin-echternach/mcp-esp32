@@ -41,21 +41,28 @@ esp_err_t mcp_pthread_pool_init(int pool_size) {
         return ESP_FAIL;
     }
     
-    // Create worker pthreads
+    // Create worker pthreads with larger stack size
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 32768);  // 64KB stack
+    
     for (int i = 0; i < pool_size; i++) {
         int* worker_id = malloc(sizeof(int));
         *worker_id = i;
         
-        int ret = pthread_create(&g_pool.workers[i], NULL, mcp_worker_thread, worker_id);
+        int ret = pthread_create(&g_pool.workers[i], &attr, mcp_worker_thread, worker_id);
         if (ret != 0) {
             ESP_LOGE(TAG, "Failed to create worker thread %d: %d", i, ret);
             g_pool.shutdown = true;
             mcp_pthread_pool_shutdown();
+            pthread_attr_destroy(&attr);
             return ESP_FAIL;
         }
         
         ESP_LOGD(TAG, "Created worker pthread %d", i);
     }
+    
+    pthread_attr_destroy(&attr);
     
     g_pool.initialized = true;
     ESP_LOGI(TAG, "✅ MCP pthread pool initialized successfully");

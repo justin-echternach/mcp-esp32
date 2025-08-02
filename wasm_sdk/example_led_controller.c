@@ -160,10 +160,19 @@ mcp_result_t get_system_info_handler(const char* params) {
 
 // Module initialization - called when WASM module is loaded
 void _start() {
+    log_info("_start", "Function entered");
+    
     // Initialize MCP server
-    mcp_server_init("led_controller", "1.0.0");
+    log_info("_start", "About to call mcp_server_init");
+    int32_t init_result = mcp_server_init("led_controller", "1.0.0");
+    if (init_result != 0) {
+        log_error("_start", "mcp_server_init failed");
+        return;
+    }
+    log_info("_start", "mcp_server_init completed");
     
     // Register tools
+    log_info("_start", "About to create tools array");
     mcp_tool_t tools[] = {
         {
             .name = "control_led",
@@ -186,15 +195,21 @@ void _start() {
             .handler = get_system_info_handler
         }
     };
+    log_info("_start", "Tools array created");
     
     // Register all tools
+    log_info("_start", "About to register tools");
     for (int i = 0; i < 4; i++) {
+        log_info("_start", "About to register tool");
         if (mcp_register_tool(&tools[i]) != 0) {
-            log_error("LED", "Failed to register tool");
+            log_error("_start", "Failed to register tool");
+        } else {
+            log_info("_start", "Tool registered");
         }
     }
     
     log_info("LED", "LED Controller MCP module initialized with 4 tools");
+    log_info("_start", "Function completed successfully");
 }
 
 // Main MCP request handler (required export)
