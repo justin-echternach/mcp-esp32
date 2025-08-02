@@ -34,7 +34,7 @@ static int atoi(const char* str);
 // Global state - using heap-allocated strings
 static char* g_server_name = NULL;
 static char* g_server_version = NULL;
-static mcp_tool_t g_tools[16];  // Max 16 tools per module
+static mcp_tool_t* g_tools = NULL;  // Heap-allocated tools array
 static int g_tool_count = 0;
 static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
 
@@ -55,6 +55,10 @@ int32_t mcp_server_init(const char* server_name, const char* version) {
     if (g_server_version) {
         free(g_server_version);
         g_server_version = NULL;
+    }
+    if (g_tools) {
+        free(g_tools);
+        g_tools = NULL;
     }
     
     log_info("MCP", "mcp_server_init: About to allocate server name");
@@ -83,6 +87,18 @@ int32_t mcp_server_init(const char* server_name, const char* version) {
     g_server_version[15] = '\0';
     log_info("MCP", "mcp_server_init: Version copied to heap");
     
+    log_info("MCP", "mcp_server_init: About to allocate tools array");
+    g_tools = malloc(sizeof(mcp_tool_t) * 16);
+    if (!g_tools) {
+        log_info("MCP", "mcp_server_init: Failed to allocate tools array");
+        free(g_server_name);
+        free(g_server_version);
+        g_server_name = NULL;
+        g_server_version = NULL;
+        return -1;
+    }
+    log_info("MCP", "mcp_server_init: Tools array allocated on heap");
+    
     g_tool_count = 0;
     log_info("MCP", "mcp_server_init: Tool count reset");
     
@@ -96,6 +112,11 @@ int32_t mcp_register_tool(const mcp_tool_t* tool) {
     
     if (!tool) {
         log_info("MCP", "mcp_register_tool: NULL tool");
+        return -1;
+    }
+    
+    if (!g_tools) {
+        log_info("MCP", "mcp_register_tool: Tools array not allocated");
         return -1;
     }
     
@@ -239,6 +260,10 @@ static int32_t handle_initialized(char* response, int32_t max_len) {
 
 // Handle tools/list request
 static int32_t handle_tools_list(char* response, int32_t max_len) {
+    if (!g_tools) {
+        return json_create_error(-32003, "Tools array not allocated", response, max_len);
+    }
+    
     // Use the response buffer directly to avoid large stack allocation
     strcpy(response, "{\"tools\":[");
     
@@ -285,6 +310,10 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
 
 // Handle tools/call request
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len) {
+    if (!g_tools) {
+        return json_create_error(-32003, "Tools array not allocated", response, max_len);
+    }
+    
     char tool_name[64];
     char tool_params[256];
     

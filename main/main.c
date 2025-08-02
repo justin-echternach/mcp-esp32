@@ -1753,7 +1753,7 @@ static int32_t native_strcpy(wasm_exec_env_t exec_env, char* dest, const char* s
 {
     // Using automatic string conversion ($$) - no validation needed for src
     // dest is a pointer that we need to validate
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    //wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     // We can't easily validate dest size, so we'll trust the WASM code
     strcpy(dest, src);
     return (uint32_t)dest; // Return WASM address

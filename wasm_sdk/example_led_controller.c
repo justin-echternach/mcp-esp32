@@ -1,6 +1,9 @@
 #include "mcp_sdk.h"
 #include <stdio.h>
 
+// Host-provided string function
+extern char* strcpy(char* dest, const char* src);
+
 // Example LED Controller MCP Module
 // This demonstrates how to implement MCP tools using the SDK
 
@@ -173,28 +176,28 @@ void _start() {
     
     // Register tools
     log_info("_start", "About to create tools array");
-    mcp_tool_t tools[] = {
-        {
-            .name = "control_led",
-            .description = "Control LED state on specified GPIO pin. Parameters: pin (number), state (0|1)",
-            .handler = control_led_handler
-        },
-        {
-            .name = "get_led_status", 
-            .description = "Get current LED state from GPIO pin. Parameters: pin (number)",
-            .handler = get_led_status_handler
-        },
-        {
-            .name = "toggle_led",
-            .description = "Toggle LED state on specified GPIO pin. Parameters: pin (number)",
-            .handler = toggle_led_handler
-        },
-        {
-            .name = "get_system_info",
-            .description = "Get ESP32 system information (heap, uptime, etc). No parameters",
-            .handler = get_system_info_handler
-        }
-    };
+    mcp_tool_t tools[4];
+    
+    // Initialize tool 0: control_led
+    strcpy(tools[0].name, "control_led");
+    strcpy(tools[0].description, "Control LED state on specified GPIO pin. Parameters: pin (number), state (0|1)");
+    tools[0].handler = control_led_handler;
+    
+    // Initialize tool 1: get_led_status
+    strcpy(tools[1].name, "get_led_status");
+    strcpy(tools[1].description, "Get current LED state from GPIO pin. Parameters: pin (number)");
+    tools[1].handler = get_led_status_handler;
+    
+    // Initialize tool 2: toggle_led
+    strcpy(tools[2].name, "toggle_led");
+    strcpy(tools[2].description, "Toggle LED state on specified GPIO pin. Parameters: pin (number)");
+    tools[2].handler = toggle_led_handler;
+    
+    // Initialize tool 3: get_system_info
+    strcpy(tools[3].name, "get_system_info");
+    strcpy(tools[3].description, "Get ESP32 system information (heap, uptime, etc). No parameters");
+    tools[3].handler = get_system_info_handler;
+    
     log_info("_start", "Tools array created");
     
     // Register all tools
