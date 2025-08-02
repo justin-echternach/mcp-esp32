@@ -410,7 +410,7 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
                 // Format response according to MCP spec
                 char mcp_result[1024];
                 snprintf(mcp_result, sizeof(mcp_result),
-                    "{\"content\":[{\"type\":\"text\",\"text\":%s}],\"isError\":false}",
+                    "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],\"isError\":false}",
                     result.data);
                 return create_jsonrpc_response(mcp_result, response, max_len);
             } else {

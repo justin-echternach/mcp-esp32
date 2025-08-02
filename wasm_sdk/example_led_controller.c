@@ -48,12 +48,12 @@ mcp_result_t control_led_handler(const char* params) {
         return mcp_error(-6, "Failed to set GPIO level");
     }
     
-    // Create success response
+    // Create human-readable response for MCP
     snprintf(result_json, sizeof(result_json), 
-        "{\"pin\":%d,\"state\":%d,\"message\":\"LED %s\"}", 
-        pin, state, state ? "ON" : "OFF");
+        "Successfully set LED on pin %d to %s", 
+        pin, state ? "ON" : "OFF");
     
-    // Send SSE event
+    // Send SSE event with JSON data
     char event_data[128];
     snprintf(event_data, sizeof(event_data), "{\"pin\":%d,\"state\":%d}", pin, state);
     sse_send_event("gpio_change", event_data);
@@ -83,10 +83,10 @@ mcp_result_t get_led_status_handler(const char* params) {
         return mcp_error(-3, "Failed to read GPIO level");
     }
     
-    // Create response
+    // Create human-readable response for MCP
     snprintf(result_json, sizeof(result_json), 
-        "{\"pin\":%d,\"level\":%d,\"state\":\"%s\"}", 
-        pin, level, level ? "ON" : "OFF");
+        "LED on pin %d is currently %s (GPIO level: %d)", 
+        pin, level ? "ON" : "OFF", level);
     
     return mcp_success(result_json);
 }
@@ -132,10 +132,10 @@ mcp_result_t toggle_led_handler(const char* params) {
         return mcp_error(-6, "Failed to set GPIO level");
     }
     
-    // Create response
+    // Create human-readable response for MCP
     snprintf(result_json, sizeof(result_json), 
-        "{\"pin\":%d,\"previous_state\":%d,\"new_state\":%d,\"message\":\"LED toggled %s\"}", 
-        pin, current_level, new_level, new_level ? "ON" : "OFF");
+        "Successfully toggled LED on pin %d from %s to %s", 
+        pin, current_level ? "ON" : "OFF", new_level ? "ON" : "OFF");
     
     // Send SSE event
     char event_data[128];
@@ -155,7 +155,7 @@ mcp_result_t get_system_info_handler(const char* params) {
     int32_t tick_count = get_tick_count();
     
     snprintf(result_json, sizeof(result_json),
-        "{\"free_heap\":%d,\"uptime_ms\":%d,\"tick_count\":%d,\"status\":\"running\"}",
+        "System Status: Free heap %d bytes, Uptime %dms, Tick count %d, Status: running",
         free_heap, uptime, tick_count);
     
     return mcp_success(result_json);
