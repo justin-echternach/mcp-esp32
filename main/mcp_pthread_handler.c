@@ -206,7 +206,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     // Use fixed offsets within the first 64KB of WASM memory
     uint64_t request_wasm_buffer = 1024;  // Start at 1KB offset
     uint64_t response_wasm_buffer = 2048; // Start at 2KB offset
-    size_t response_size = 512;  // Small response buffer
+    size_t response_size = 2048;  // Small response buffer
     
     // Get native pointers from WASM offsets
     request_native_ptr = (char*)wasm_runtime_addr_app_to_native(module->wasm_module_inst, request_wasm_buffer);

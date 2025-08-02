@@ -264,39 +264,24 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
         return json_create_error(-32003, "Tools array not allocated", response, max_len);
     }
     
+    // Log the tool count to debug missing 4th tool
+    char count_msg[64];
+    snprintf(count_msg, sizeof(count_msg), "handle_tools_list: g_tool_count = %d", g_tool_count);
+    log_info("MCP", count_msg);
+    
     // Use the response buffer directly to avoid large stack allocation
     strcpy(response, "{\"tools\":[");
     
     for (int i = 0; i < g_tool_count; i++) {
-        char tool_json[256];  // Reduced size
+        char tool_json[512];  // Increased size to accommodate full descriptions
         
-        // Create simplified tool schema - shorter descriptions to fit in smaller buffer
-        if (wasm_strcmp(g_tools[i].name, "control_led") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"Control LED\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
-                "\"pin\":{\"type\":\"number\"},\"state\":{\"type\":\"number\"}"
-                "},\"required\":[\"pin\",\"state\"]}}",
-                i > 0 ? "," : "", g_tools[i].name);
-        } else if (wasm_strcmp(g_tools[i].name, "get_led_status") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"Get LED status\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
-                "\"pin\":{\"type\":\"number\"}},\"required\":[\"pin\"]}}",
-                i > 0 ? "," : "", g_tools[i].name);
-        } else if (wasm_strcmp(g_tools[i].name, "toggle_led") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"Toggle LED\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{"
-                "\"pin\":{\"type\":\"number\"}},\"required\":[\"pin\"]}}",
-                i > 0 ? "," : "", g_tools[i].name);
-        } else {
-            // Default schema for tools without parameters
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"description\":\"System info\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-                i > 0 ? "," : "", g_tools[i].name);
-        }
+        // Create generic tool schema using actual registered tool data
+        snprintf(tool_json, sizeof(tool_json),
+            "%s{\"name\":\"%s\",\"description\":\"%s\","
+            "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
+            i > 0 ? "," : "", 
+            g_tools[i].name, 
+            g_tools[i].description);
         
         // Check if we have space before adding
         if (strlen(response) + strlen(tool_json) + 3 < max_len) {
