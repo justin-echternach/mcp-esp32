@@ -1633,13 +1633,18 @@ static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const
 // String Functions (C library compatibility)
 static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Using automatic string conversion ($$) - no validation needed
     
     // Standard strcat implementation
     char* d = dest;
     while (*d) d++; // Find end of dest
     while ((*d++ = *src++)); // Copy src to end of dest
-    return (uint32_t)dest; // Return WASM address
+    
+    // Convert host pointer back to WASM address
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    return wasm_addr;
 }
 
 // Native strcmp implementation
@@ -1679,22 +1684,31 @@ static int32_t native_strlen(wasm_exec_env_t exec_env, const char* s)
 // Native strncpy implementation
 static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Using automatic string conversion ($*i) - src is auto-converted, dest is manual pointer
-    // wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     // if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n)) {
     //     return 0; // Return 0 on validation failure
     // }
     
     strncpy(dest, src, n);
-    return (uint32_t)dest; // Return WASM address
+    
+    // Convert host pointer back to WASM address
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    return wasm_addr;
 }
 
 // Native memcpy implementation  
 static int32_t native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src, int32_t n)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Using automatic pointer conversion (**i) - no validation needed
     memcpy(dest, src, n);
-    return (uint32_t)dest; // Return WASM address
+    
+    // Convert host pointer back to WASM address
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    return wasm_addr;
 }
 
 // Native memcmp implementation
@@ -1760,12 +1774,16 @@ static void native_free(wasm_exec_env_t exec_env, uint32_t ptr)
 // Native strcpy implementation
 static int32_t native_strcpy(wasm_exec_env_t exec_env, char* dest, const char* src)
 {
+    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
     // Using automatic string conversion ($$) - no validation needed for src
     // dest is a pointer that we need to validate
-    //wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     // We can't easily validate dest size, so we'll trust the WASM code
     strcpy(dest, src);
-    return (uint32_t)dest; // Return WASM address
+    
+    // Convert host pointer back to WASM address
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    return wasm_addr;
 }
 
 // Native strncmp implementation
