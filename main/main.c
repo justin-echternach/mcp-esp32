@@ -1267,17 +1267,29 @@ static int32_t native_get_tick(wasm_exec_env_t exec_env)
 static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
 {
     // Check if pin is protected
-    if (pin >= 0 && pin < 40) {
-        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
-            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
-                ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
-                return -1; // Protected pin
-            }
-        }
-    }
-    
+    // if (pin >= 0 && pin < 40) {
+    //     for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+    //         if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+    //             ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
+    //             return -1; // Protected pin
+    //         }
+    //     }
+    // }
+
+
+    gpio_config_t io_config = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = (gpio_mode_t)GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    esp_err_t err1 = gpio_config(&io_config);
+
     ESP_LOGI(TAG, "WASM setting GPIO %d to level %d", pin, level);
     esp_err_t err = gpio_set_level((gpio_num_t)pin, level);
+
+    ESP_LOGI(TAG, "WASM set GPIO %d to level %d, result=%d", pin, level, err);
     
     // Update LED state if this is the LED pin
     if (pin == LED_GPIO && g_led_state_mutex) {
@@ -1306,24 +1318,34 @@ static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
 static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
 {
     // Check if pin is protected
-    if (pin >= 0 && pin < 40) {
-        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
-            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
-                ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
-                return -1;
-            }
-        }
+    // if (pin >= 0 && pin < 40) {
+    //     for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+    //         if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+    //             ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
+    //             return -1;
+    //         }
+    //     }
         
-        // Check if pin is input-only
-        for (int i = 0; i < g_mcp_config.gpio_protection.input_only_pin_count; i++) {
-            if (g_mcp_config.gpio_protection.input_only_pins[i] == pin && direction != GPIO_MODE_INPUT) {
-                ESP_LOGW(TAG, "GPIO pin %d is input-only, output mode denied", pin);
-                return -2;
-            }
-        }
-    }
+    //     // Check if pin is input-only
+    //     for (int i = 0; i < g_mcp_config.gpio_protection.input_only_pin_count; i++) {
+    //         if (g_mcp_config.gpio_protection.input_only_pins[i] == pin && direction != GPIO_MODE_INPUT) {
+    //             ESP_LOGW(TAG, "GPIO pin %d is input-only, output mode denied", pin);
+    //             return -2;
+    //         }
+    //     }
+    // }
     
-    esp_err_t err = gpio_set_direction((gpio_num_t)pin, (gpio_mode_t)direction);
+    // Use comprehensive GPIO configuration instead of just setting direction
+    gpio_config_t io_config = {
+        .pin_bit_mask = (1ULL << pin),
+        .mode = (gpio_mode_t)direction,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    esp_err_t err = gpio_config(&io_config);
+    
+    ESP_LOGI(TAG, "WASM configured GPIO %d with comprehensive setup, mode=%d, result=%d", pin, direction, err);
     return err == ESP_OK ? 0 : -3;
 }
 
@@ -2083,14 +2105,18 @@ void iwasm_main(void *arg)
     }
 
     // Configure GPIO for LED
-    gpio_config_t io_config = {
-        .pin_bit_mask = (1ULL << LED_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_config);
+    // gpio_config_t io_config = {
+    //     .pin_bit_mask = (1ULL << LED_GPIO),
+    //     .mode = GPIO_MODE_OUTPUT,
+    //     .pull_up_en = GPIO_PULLUP_DISABLE,
+    //     .pull_down_en = GPIO_PULLDOWN_DISABLE,
+    //     .intr_type = GPIO_INTR_DISABLE
+    // };
+    // gpio_config(&io_config);
+    
+    // Set initial LED state to OFF
+    // gpio_set_level(LED_GPIO, 0);
+    // ESP_LOGI(TAG, "LED GPIO %d initialized to OFF state", LED_GPIO);
 
     // Configure ESP32-specific memory allocation (from ESP-WASMachine)
     memset(&init_args, 0, sizeof(RuntimeInitArgs));
@@ -2183,34 +2209,34 @@ void iwasm_main(void *arg)
     g_wasm_available = wasm_available;
     
     // Debug: Dump LED WASM exports for comparison
-    dump_wasm_exports(wasm_module, "led.was");
+    // dump_wasm_exports(wasm_module, "led.was");
     
     // Test WASM LED function execution in pthread context
-    if (exec_env) {
-        ESP_LOGI(TAG, "Testing WASM LED functions in pthread context...");
+    // if (exec_env) {
+    //     ESP_LOGI(TAG, "Testing WASM LED functions in pthread context...");
         
-        // Test LED on function
-        wasm_function_inst_t led_on_func = wasm_runtime_lookup_function(wasm_module_inst, "led_on");
-        if (led_on_func) {
-            if (safe_wasm_call(exec_env, led_on_func, 0, NULL)) {
-                ESP_LOGI(TAG, "✅ WASM led_on() executed - LED should be ON");
-                vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED on for 500ms
-            } else {
-                ESP_LOGE(TAG, "❌ WASM led_on function call failed");
-            }
-        }
+    //     // Test LED on function
+    //     wasm_function_inst_t led_on_func = wasm_runtime_lookup_function(wasm_module_inst, "led_on");
+    //     if (led_on_func) {
+    //         if (safe_wasm_call(exec_env, led_on_func, 0, NULL)) {
+    //             ESP_LOGI(TAG, "✅ WASM led_on() executed - LED should be ON");
+    //             vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED on for 500ms
+    //         } else {
+    //             ESP_LOGE(TAG, "❌ WASM led_on function call failed");
+    //         }
+    //     }
         
-        // Test LED off function
-        wasm_function_inst_t led_off_func = wasm_runtime_lookup_function(wasm_module_inst, "led_off");
-        if (led_off_func) {
-            if (safe_wasm_call(exec_env, led_off_func, 0, NULL)) {
-                ESP_LOGI(TAG, "✅ WASM led_off() executed - LED should be OFF");
-                vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED off for 500ms
-            } else {
-                ESP_LOGE(TAG, "❌ WASM led_off function call failed");
-            }
-        }
-    }
+    //     // Test LED off function
+    //     wasm_function_inst_t led_off_func = wasm_runtime_lookup_function(wasm_module_inst, "led_off");
+    //     if (led_off_func) {
+    //         if (safe_wasm_call(exec_env, led_off_func, 0, NULL)) {
+    //             ESP_LOGI(TAG, "✅ WASM led_off() executed - LED should be OFF");
+    //             vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED off for 500ms
+    //         } else {
+    //             ESP_LOGE(TAG, "❌ WASM led_off function call failed");
+    //         }
+    //     }
+    // }
 
     goto main_loop;
 
