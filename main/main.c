@@ -797,7 +797,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 // Initialize WiFi using minimal framework
 static void wifi_init_sta(void) {
     ESP_LOGI(TAG, "Using minimal WiFi framework (exact copy of working code)...");
-    mcp_wifi_init_sta(&wifi_event_handler);
+    mcp_wifi_init_sta(WIFI_SSID, WIFI_PASS, &wifi_event_handler);
 }
 
 // ========== WASM Functions ==========

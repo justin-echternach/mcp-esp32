@@ -21,7 +21,7 @@ extern const char* g_wifi_tag;
 typedef void (*wifi_event_handler_t)(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data);
 
 // Exact function signatures from main.c (but event handler stays in main.c)
-void mcp_wifi_init_sta(wifi_event_handler_t event_handler);
+void mcp_wifi_init_sta(const char* ssid, const char* password, wifi_event_handler_t event_handler);
 
 #ifdef __cplusplus
 }
