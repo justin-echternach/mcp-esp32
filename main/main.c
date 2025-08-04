@@ -21,6 +21,7 @@
 
 // MCP Framework includes
 #include "../mcp_framework/include/mcp_config.h"
+#include "../mcp_framework/include/mcp_config_loader.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
 
 // SD Card includes
@@ -88,250 +89,26 @@ static void register_mcp_endpoints(httpd_handle_t server);
 static mcp_config_t g_mcp_config = {0};
 static bool g_mcp_config_loaded = false;
 
-// ========== Minimal JSON Parser ==========
+// ========== JSON Config Loading ==========
+// JSON parsing functions moved to mcp_framework/src/mcp_config_loader.c
 
-// Find a string value in JSON by key
-static bool json_find_string(const char* json, const char* key, char* value, size_t max_len) {
-    char search_key[128];
-    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
-    
-    const char* key_pos = strstr(json, search_key);
-    if (!key_pos) return false;
-    
-    // Find the opening quote of the value
-    const char* value_start = strchr(key_pos + strlen(search_key), '"');
-    if (!value_start) return false;
-    value_start++; // Skip opening quote
-    
-    // Find the closing quote
-    const char* value_end = strchr(value_start, '"');
-    if (!value_end) return false;
-    
-    size_t len = value_end - value_start;
-    if (len >= max_len) len = max_len - 1;
-    
-    strncpy(value, value_start, len);
-    value[len] = '\0';
-    return true;
-}
+// ========== MCP Config Initialization ==========
 
-// Find an integer value in JSON by key
-static bool json_find_int(const char* json, const char* key, int* value) {
-    char search_key[128];
-    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
-    
-    const char* key_pos = strstr(json, search_key);
-    if (!key_pos) return false;
-    
-    // Skip to the value part
-    const char* value_start = key_pos + strlen(search_key);
-    while (*value_start == ' ' || *value_start == '\t') value_start++;
-    
-    *value = atoi(value_start);
-    return true;
-}
-
-// Find a boolean value in JSON by key
-static bool json_find_bool(const char* json, const char* key, bool* value) {
-    char search_key[128];
-    snprintf(search_key, sizeof(search_key), "\"%s\":", key);
-    
-    const char* key_pos = strstr(json, search_key);
-    if (!key_pos) return false;
-    
-    const char* value_start = key_pos + strlen(search_key);
-    while (*value_start == ' ' || *value_start == '\t') value_start++;
-    
-    if (strncmp(value_start, "true", 4) == 0) {
-        *value = true;
-        return true;
-    } else if (strncmp(value_start, "false", 5) == 0) {
-        *value = false;
-        return true;
-    }
-    return false;
-}
-
-// Parse JSON array of integers
-static int json_parse_int_array(const char* json, const char* key, int* array, int max_count) {
-    char search_key[128];
-    snprintf(search_key, sizeof(search_key), "\"%s\":[", key);
-    
-    const char* array_start = strstr(json, search_key);
-    if (!array_start) return 0;
-    
-    array_start += strlen(search_key);
-    const char* array_end = strchr(array_start, ']');
-    if (!array_end) return 0;
-    
-    int count = 0;
-    const char* pos = array_start;
-    
-    while (pos < array_end && count < max_count) {
-        while (*pos == ' ' || *pos == '\t' || *pos == ',') pos++;
-        if (pos >= array_end) break;
-        
-        array[count] = atoi(pos);
-        count++;
-        
-        // Find next comma or end
-        while (pos < array_end && *pos != ',' && *pos != ']') pos++;
-        if (*pos == ',') pos++;
-    }
-    
-    return count;
-}
-
-// ========== MCP Config Loader ==========
-
-// Load MCP configuration from file
-static bool load_mcp_config_from_file(const char* filepath) {
-    ESP_LOGI(TAG, "Loading MCP config from: %s", filepath);
-    
-    FILE* file = fopen(filepath, "r");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open MCP config file: %s (errno: %d - %s)", filepath, errno, strerror(errno));
-        return false;
-    }
-    
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    if (size <= 0 || size > 8192) {  // Reasonable config size limit
-        ESP_LOGE(TAG, "Invalid MCP config file size: %ld", size);
-        fclose(file);
-        return false;
-    }
-    
-    // Read entire config file
-    char* config_json = malloc(size + 1);
-    if (!config_json) {
-        ESP_LOGE(TAG, "Failed to allocate memory for MCP config");
-        fclose(file);
-        return false;
-    }
-    
-    size_t bytes_read = fread(config_json, 1, size, file);
-    fclose(file);
-    config_json[bytes_read] = '\0';
-    
-    if (bytes_read != size) {
-        ESP_LOGE(TAG, "Failed to read MCP config completely");
-        free(config_json);
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "MCP config file loaded (%zu bytes)", bytes_read);
-    
-    // Parse GPIO protection settings
-    g_mcp_config.gpio_protection.protected_pin_count = json_parse_int_array(
-        config_json, "protected_pins", 
-        g_mcp_config.gpio_protection.protected_pins, 
-        MAX_PROTECTED_PINS
-    );
-    
-    g_mcp_config.gpio_protection.input_only_pin_count = json_parse_int_array(
-        config_json, "input_only_pins",
-        g_mcp_config.gpio_protection.input_only_pins,
-        MAX_PROTECTED_PINS
-    );
-    
-    g_mcp_config.gpio_protection.max_current_pin_count = json_parse_int_array(
-        config_json, "max_current_pins",
-        g_mcp_config.gpio_protection.max_current_pins,
-        MAX_PROTECTED_PINS
-    );
-    
-    // Parse system settings
-    json_find_int(config_json, "max_wasm_modules", &g_mcp_config.system.max_wasm_modules);
-    json_find_int(config_json, "wasm_heap_size", &g_mcp_config.system.wasm_heap_size);
-    json_find_int(config_json, "wasm_stack_size", &g_mcp_config.system.wasm_stack_size);
-    json_find_int(config_json, "sse_max_clients", &g_mcp_config.system.sse_max_clients);
-    json_find_int(config_json, "mcp_timeout_ms", &g_mcp_config.system.mcp_timeout_ms);
-    
-    // Parse security settings
-    json_find_bool(config_json, "require_auth", &g_mcp_config.require_auth);
-    json_find_int(config_json, "rate_limit_per_minute", &g_mcp_config.rate_limit_per_minute);
-    
-    // Parse routes from nested JSON structure
-    g_mcp_config.route_count = 0;
-    
-    // Find the "routes" object in the JSON
-    const char* routes_start = strstr(config_json, "\"routes\"");
-    if (routes_start) {
-        // Find the opening brace of the routes object
-        const char* routes_obj = strchr(routes_start, '{');
-        if (routes_obj) {
-            routes_obj++; // Skip the opening brace
-            
-            // Parse individual route entries
-            const char* route_patterns[] = {"\"/mcp\"", "\"/mcp/led\"", "\"/mcp/gpio\"", "\"/mcp/system\""};
-            const char* route_names[] = {"/mcp", "/mcp/led", "/mcp/gpio", "/mcp/system"};
-            
-            for (int i = 0; i < 4 && g_mcp_config.route_count < MAX_MCP_ROUTES; i++) {
-                const char* route_entry = strstr(routes_obj, route_patterns[i]);
-                if (route_entry) {
-                    // Find the value after the colon
-                    const char* colon = strchr(route_entry, ':');
-                    if (colon) {
-                        colon++; // Skip colon
-                        while (*colon == ' ' || *colon == '\t') colon++; // Skip whitespace
-                        
-                        if (*colon == '"') {
-                            colon++; // Skip opening quote
-                            char wasm_file[MAX_FILENAME_LENGTH];
-                            int j = 0;
-                            while (*colon && *colon != '"' && j < MAX_FILENAME_LENGTH - 1) {
-                                wasm_file[j++] = *colon++;
-                            }
-                            wasm_file[j] = '\0';
-                            
-                            // Store the route
-                            strncpy(g_mcp_config.routes[g_mcp_config.route_count].route, route_names[i], MAX_ROUTE_LENGTH - 1);
-                            strncpy(g_mcp_config.routes[g_mcp_config.route_count].wasm_file, wasm_file, MAX_FILENAME_LENGTH - 1);
-                            g_mcp_config.route_count++;
-                            
-                            ESP_LOGI(TAG, "Parsed route: %s -> %s", route_names[i], wasm_file);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    free(config_json);
-    
-    ESP_LOGI(TAG, "MCP config loaded successfully:");
-    ESP_LOGI(TAG, "  Protected pins: %d", g_mcp_config.gpio_protection.protected_pin_count);
-    ESP_LOGI(TAG, "  Input-only pins: %d", g_mcp_config.gpio_protection.input_only_pin_count);
-    ESP_LOGI(TAG, "  Max current pins: %d", g_mcp_config.gpio_protection.max_current_pin_count);
-    ESP_LOGI(TAG, "  Routes configured: %d", g_mcp_config.route_count);
-    ESP_LOGI(TAG, "  Max WASM modules: %d", g_mcp_config.system.max_wasm_modules);
-    ESP_LOGI(TAG, "  WASM heap size: %d", g_mcp_config.system.wasm_heap_size);
-    
-    return true;
-}
-
-// Initialize MCP configuration
+// Initialize MCP configuration using framework functions
 static bool init_mcp_config(void) {
     if (g_mcp_config_loaded) {
         return true;
     }
     
-    // Set defaults first
-    g_mcp_config.system.max_wasm_modules = 2;
-    g_mcp_config.system.wasm_heap_size = 8192;  // Reduced from 32KB to 8KB
-    g_mcp_config.system.wasm_stack_size = 4096; // Reduced from 8KB to 4KB
-    g_mcp_config.system.sse_max_clients = 8;
-    g_mcp_config.system.mcp_timeout_ms = 5000;
-    g_mcp_config.require_auth = false;
-    g_mcp_config.rate_limit_per_minute = 100;
+    // Initialize with defaults first
+    if (!mcp_config_init_defaults(&g_mcp_config)) {
+        ESP_LOGE(TAG, "Failed to initialize MCP config defaults");
+        return false;
+    }
     
     // Try to load from SD card first
     ESP_LOGI(TAG, "Attempting to load MCP config from SD card...");
-    if (load_mcp_config_from_file("/sdcard/cfg.jsn")) {
+    if (mcp_config_load_from_file(&g_mcp_config, "/sdcard/cfg.jsn")) {
         ESP_LOGI(TAG, "MCP config loaded from SD card");
         g_mcp_config_loaded = true;
         
@@ -343,7 +120,7 @@ static bool init_mcp_config(void) {
     
     // Also try without extension in case of FAT32 8.3 filename issues
     ESP_LOGI(TAG, "Trying alternative config filename...");
-    if (load_mcp_config_from_file("/sdcard/mcp_config.json")) {
+    if (mcp_config_load_from_file(&g_mcp_config, "/sdcard/mcp_config.json")) {
         ESP_LOGI(TAG, "MCP config loaded from SD card (full filename)");
         g_mcp_config_loaded = true;
         
@@ -354,7 +131,7 @@ static bool init_mcp_config(void) {
     }
     
     // Try to load from SPIFFS/NVS (embedded)
-    if (load_mcp_config_from_file("/spiffs/cfg.jsn")) {
+    if (mcp_config_load_from_file(&g_mcp_config, "/spiffs/cfg.jsn")) {
         ESP_LOGI(TAG, "MCP config loaded from embedded storage");
         g_mcp_config_loaded = true;
         return true;
@@ -362,20 +139,12 @@ static bool init_mcp_config(void) {
     
     ESP_LOGW(TAG, "No MCP config file found, using defaults");
     
-    // Set up default routes
-    strncpy(g_mcp_config.routes[0].route, "/mcp", MAX_ROUTE_LENGTH - 1);
-    strncpy(g_mcp_config.routes[0].wasm_file, "default_mcp.wasm", MAX_FILENAME_LENGTH - 1);
-    g_mcp_config.route_count = 1;
-    
-    // Set default protected pins (ESP32 boot/flash pins)
-    int default_protected[] = {0, 1, 6, 7, 8, 9, 10, 11};
-    int default_input_only[] = {34, 35, 36, 39};
-    
-    g_mcp_config.gpio_protection.protected_pin_count = 8;
-    memcpy(g_mcp_config.gpio_protection.protected_pins, default_protected, sizeof(default_protected));
-    
-    g_mcp_config.gpio_protection.input_only_pin_count = 4;
-    memcpy(g_mcp_config.gpio_protection.input_only_pins, default_input_only, sizeof(default_input_only));
+    // Add a default route for fallback
+    if (g_mcp_config.route_count == 0) {
+        strncpy(g_mcp_config.routes[0].route, "/mcp", MAX_ROUTE_LENGTH - 1);
+        strncpy(g_mcp_config.routes[0].wasm_file, "led_ctrl.was", MAX_FILENAME_LENGTH - 1);
+        g_mcp_config.route_count = 1;
+    }
     
     g_mcp_config_loaded = true;
     return true;
@@ -1376,7 +1145,7 @@ static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* j
     
     // Parse JSON-RPC method
     ESP_LOGI(TAG, "🔍 JSON_PARSE: About to call json_find_string");
-    if (!json_find_string(json, "method", method, 64)) {  // method buffer is 64 bytes
+    if (!mcp_json_find_string(json, "method", method, 64)) {  // method buffer is 64 bytes
         ESP_LOGE(TAG, "🔍 JSON_PARSE: json_find_string failed - method not found");
         return -2; // Method not found
     }
