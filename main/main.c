@@ -23,6 +23,7 @@
 #include "../mcp_framework/include/mcp_config.h"
 #include "../mcp_framework/include/mcp_config_loader.h"
 #include "../mcp_framework/include/mcp_host_functions.h"
+#include "../mcp_framework/include/mcp_http_server.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
 
 // SD Card includes
@@ -679,14 +680,6 @@ const char* find_wasm_for_route(const char* route) {
 }
 
 
-// Handle CORS preflight requests
-static esp_err_t mcp_options_handler(httpd_req_t *req) {
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-    httpd_resp_send(req, "", 0);
-    return ESP_OK;
-}
 
 // Register MCP endpoints after config is loaded
 static void register_mcp_endpoints(httpd_handle_t server) {
@@ -695,28 +688,12 @@ static void register_mcp_endpoints(httpd_handle_t server) {
         return;
     }
     
-    ESP_LOGI(TAG, "Registering %d MCP endpoints...", g_mcp_config.route_count);
-    
-    for (int i = 0; i < g_mcp_config.route_count; i++) {
-        // Register POST handler for MCP requests
-        httpd_uri_t* mcp_post = malloc(sizeof(httpd_uri_t));
-        mcp_post->uri = strdup(g_mcp_config.routes[i].route);
-        mcp_post->method = HTTP_POST;
-        mcp_post->handler = mcp_pthread_handler;
-        mcp_post->user_ctx = NULL;
-        httpd_register_uri_handler(server, mcp_post);
-        
-        // Register OPTIONS handler for CORS preflight
-        httpd_uri_t* mcp_options = malloc(sizeof(httpd_uri_t));
-        mcp_options->uri = strdup(g_mcp_config.routes[i].route);
-        mcp_options->method = HTTP_OPTIONS;
-        mcp_options->handler = mcp_options_handler;
-        mcp_options->user_ctx = NULL;
-        httpd_register_uri_handler(server, mcp_options);
-        
-        ESP_LOGI(TAG, "Registered MCP endpoint: %s -> %s", 
-                 g_mcp_config.routes[i].route, 
-                 g_mcp_config.routes[i].wasm_file);
+    // Use framework function to register MCP endpoints
+    esp_err_t ret = mcp_http_register_mcp_endpoints(server, &g_mcp_config, mcp_pthread_handler);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register MCP endpoints using framework: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "MCP endpoints registered successfully using framework");
     }
 }
 
@@ -757,45 +734,36 @@ static esp_err_t led_toggle_handler(httpd_req_t *req) {
 
 // Start HTTP server
 static httpd_handle_t start_webserver(void) {
-    httpd_handle_t server = NULL;
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.lru_purge_enable = true;
-    config.max_uri_handlers = 16;  // Increase from default 8 to 16
+    // Configure HTTP server using MCP framework
+    mcp_http_config_t http_config = MCP_HTTP_DEFAULT_CONFIG();
+    http_config.port = 80;
+    http_config.max_uri_handlers = 16;
+    http_config.cors_enabled = true;
     
-    ESP_LOGI(TAG, "Starting HTTP server on port %d", config.server_port);
-    
-    if (httpd_start(&server, &config) == ESP_OK) {
-        // Register URI handlers
-        httpd_uri_t root = {
-            .uri       = "/",
-            .method    = HTTP_GET,
-            .handler   = root_handler,
-            .user_ctx  = NULL
-        };
-        httpd_register_uri_handler(server, &root);
-        
-        httpd_uri_t events = {
-            .uri       = "/events",
-            .method    = HTTP_GET,
-            .handler   = sse_handler,
-            .user_ctx  = NULL
-        };
-        httpd_register_uri_handler(server, &events);
-        
-        httpd_uri_t led_toggle = {
-            .uri       = "/api/led/toggle",
-            .method    = HTTP_POST,
-            .handler   = led_toggle_handler,
-            .user_ctx  = NULL
-        };
-        httpd_register_uri_handler(server, &led_toggle);
-        
-        ESP_LOGI(TAG, "HTTP server started successfully");
-        return server;
+    // Start HTTP server using framework
+    httpd_handle_t server = mcp_http_server_start(&http_config);
+    if (!server) {
+        ESP_LOGE(TAG, "Failed to start HTTP server using MCP framework");
+        return NULL;
     }
     
-    ESP_LOGE(TAG, "Failed to start HTTP server");
-    return NULL;
+    // Register project-specific handlers
+    mcp_http_handler_t project_handlers[] = {
+        {"/", HTTP_GET, root_handler, NULL},
+        {"/events", HTTP_GET, sse_handler, NULL},
+        {"/api/led/toggle", HTTP_POST, led_toggle_handler, NULL},
+        {"/health", HTTP_GET, mcp_http_health_handler, NULL}  // Built-in framework handler
+    };
+    
+    esp_err_t ret = mcp_http_register_handlers(server, project_handlers, 
+                                               sizeof(project_handlers) / sizeof(project_handlers[0]));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register project-specific handlers");
+        mcp_http_server_stop(server);
+        return NULL;
+    }
+    
+    return server;
 }
 
 // WiFi event handler
