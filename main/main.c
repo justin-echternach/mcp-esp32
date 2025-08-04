@@ -24,6 +24,7 @@
 #include "../mcp_framework/include/mcp_config_loader.h"
 #include "../mcp_framework/include/mcp_host_functions.h"
 #include "../mcp_framework/include/mcp_http_server.h"
+#include "../mcp_framework/include/mcp_wifi_minimal.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
 
 // SD Card includes
@@ -54,9 +55,13 @@ static const char *TAG = "led-wamr";
 
 // HTTP Server globals
 static httpd_handle_t server = NULL;
-static EventGroupHandle_t wifi_event_group;
-static int s_retry_num = 0;
-const int WIFI_CONNECTED_BIT = BIT0;
+
+// WiFi globals for framework (must match extern declarations in mcp_wifi_minimal.h)
+EventGroupHandle_t g_wifi_event_group;
+int g_s_retry_num = 0;
+const int g_wifi_connected_bit = BIT0;
+int g_wifi_maximum_retry = WIFI_MAXIMUM_RETRY;
+const char* g_wifi_tag = "led-wamr";
 
 // SSE client tracking
 #define MAX_SSE_CLIENTS 4
@@ -766,78 +771,33 @@ static httpd_handle_t start_webserver(void) {
     return server;
 }
 
-// WiFi event handler
+
+// WiFi event handler - keep in main.c to avoid linking issues
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < WIFI_MAXIMUM_RETRY) {
+        if (g_s_retry_num < g_wifi_maximum_retry) {
             esp_wifi_connect();
-            s_retry_num++;
+            g_s_retry_num++;
             ESP_LOGI(TAG, "Retry connecting to WiFi...");
         } else {
-            xEventGroupSetBits(wifi_event_group, BIT1);
+            xEventGroupSetBits(g_wifi_event_group, BIT1);
         }
         ESP_LOGI(TAG,"WiFi connection failed");
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+        g_s_retry_num = 0;
+        xEventGroupSetBits(g_wifi_event_group, g_wifi_connected_bit);
     }
 }
 
-// Initialize WiFi
+// Initialize WiFi using minimal framework
 static void wifi_init_sta(void) {
-    wifi_event_group = xEventGroupCreate();
-    
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-    
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-    
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-    
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASS,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-        },
-    };
-    
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    
-    ESP_LOGI(TAG, "WiFi initialization finished");
-    
-    // Wait for connection
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-            WIFI_CONNECTED_BIT | BIT1,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
-    
-    if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Connected to WiFi SSID: %s", WIFI_SSID);
-    } else {
-        ESP_LOGE(TAG, "Failed to connect to WiFi");
-    }
+    ESP_LOGI(TAG, "Using minimal WiFi framework (exact copy of working code)...");
+    mcp_wifi_init_sta(&wifi_event_handler);
 }
 
 // ========== WASM Functions ==========
