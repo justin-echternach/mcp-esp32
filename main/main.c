@@ -25,6 +25,7 @@
 #include "../mcp_framework/include/mcp_host_functions.h"
 #include "../mcp_framework/include/mcp_http_server.h"
 #include "../mcp_framework/include/mcp_wifi_minimal.h"
+#include "../mcp_framework/include/mcp_wasm_runtime.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
 
 // SD Card includes
