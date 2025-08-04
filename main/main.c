@@ -19,6 +19,10 @@
 #include "wasm_export.h"
 #include "bh_platform.h"
 
+// MCP Framework includes
+#include "../mcp_framework/include/mcp_config.h"
+// Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
+
 // SD Card includes
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
@@ -78,42 +82,7 @@ static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, 
 static void register_mcp_endpoints(httpd_handle_t server);
 
 // ========== MCP Config System ==========
-
-#define MAX_PROTECTED_PINS 16
-#define MAX_MCP_ROUTES 8
-#define MAX_ROUTE_LENGTH 64
-#define MAX_FILENAME_LENGTH 128
-
-typedef struct {
-    int protected_pins[MAX_PROTECTED_PINS];
-    int protected_pin_count;
-    int input_only_pins[MAX_PROTECTED_PINS];
-    int input_only_pin_count;
-    int max_current_pins[MAX_PROTECTED_PINS];
-    int max_current_pin_count;
-} gpio_protection_config_t;
-
-typedef struct {
-    char route[MAX_ROUTE_LENGTH];
-    char wasm_file[MAX_FILENAME_LENGTH];
-} mcp_route_config_t;
-
-typedef struct {
-    int max_wasm_modules;
-    int wasm_heap_size;
-    int wasm_stack_size;
-    int sse_max_clients;
-    int mcp_timeout_ms;
-} system_config_t;
-
-typedef struct {
-    gpio_protection_config_t gpio_protection;
-    mcp_route_config_t routes[MAX_MCP_ROUTES];
-    int route_count;
-    system_config_t system;
-    bool require_auth;
-    int rate_limit_per_minute;
-} mcp_config_t;
+// Configuration structures now defined in mcp_framework/include/mcp_config.h
 
 // Global MCP configuration
 static mcp_config_t g_mcp_config = {0};
