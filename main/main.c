@@ -678,101 +678,6 @@ const char* find_wasm_for_route(const char* route) {
     return NULL;
 }
 
-// MCP HTTP Request Handler
-static esp_err_t mcp_handler(httpd_req_t *req) {
-    char content[2048];
-    char response[2048];
-    int ret, remaining = req->content_len;
-    
-    // Read request body
-    if (remaining >= sizeof(content)) {
-        ESP_LOGE(TAG, "MCP request too large: %d bytes", remaining);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Request too large");
-        return ESP_FAIL;
-    }
-    
-    ret = httpd_req_recv(req, content, remaining);
-    if (ret <= 0) {
-        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
-            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "Request timeout");
-        } else {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read request");
-        }
-        return ESP_FAIL;
-    }
-    content[ret] = '\0';
-    
-    ESP_LOGI(TAG, "MCP request to %s: %s", req->uri, content);
-    
-    // Find WASM module for this route
-    const char* wasm_filename = find_wasm_for_route(req->uri);
-    if (!wasm_filename) {
-        ESP_LOGW(TAG, "No WASM module configured for route: %s", req->uri);
-        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Route not configured");
-        return ESP_FAIL;
-    }
-    
-    // Load WASM module
-    mcp_wasm_module_t* module = load_mcp_wasm_module(req->uri, wasm_filename);
-    if (!module) {
-        ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to load WASM module");
-        return ESP_FAIL;
-    }
-    
-    // Look for MCP request handler function
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "mcp_req");
-    if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing mcp_req function", wasm_filename);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Invalid WASM module");
-        return ESP_FAIL;
-    }
-    
-    // Allocate WASM memory for request and response
-    uint32_t request_offset = wasm_runtime_module_malloc(module->wasm_module_inst, strlen(content) + 1, NULL);
-    uint32_t response_offset = wasm_runtime_module_malloc(module->wasm_module_inst, sizeof(response), NULL);
-    
-    if (request_offset == 0 || response_offset == 0) {
-        ESP_LOGE(TAG, "Failed to allocate WASM memory");
-        if (request_offset) wasm_runtime_module_free(module->wasm_module_inst, request_offset);
-        if (response_offset) wasm_runtime_module_free(module->wasm_module_inst, response_offset);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "WASM memory allocation failed");
-        return ESP_FAIL;
-    }
-    
-    // Copy request to WASM memory
-    void* request_ptr = wasm_runtime_addr_app_to_native(module->wasm_module_inst, request_offset);
-    void* response_ptr = wasm_runtime_addr_app_to_native(module->wasm_module_inst, response_offset);
-    strcpy((char*)request_ptr, content);
-    
-    // Call WASM function: mcp_req(request, response, max_len)
-    uint32_t argv[3] = {request_offset, response_offset, sizeof(response)};
-    
-    bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
-    int32_t result = argv[0];  // Return value
-    
-    // Copy response from WASM memory
-    strcpy(response, (char*)response_ptr);
-    
-    // Free WASM memory
-    wasm_runtime_module_free(module->wasm_module_inst, request_offset);
-    wasm_runtime_module_free(module->wasm_module_inst, response_offset);
-    
-    if (!call_success || result != 0) {
-        ESP_LOGE(TAG, "WASM MCP handler failed: result=%d", result);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "WASM handler failed");
-        return ESP_FAIL;
-    }
-    
-    // Send JSON response
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-    
-    ESP_LOGI(TAG, "MCP response: %s", response);
-    return httpd_resp_send(req, response, strlen(response));
-}
 
 // Handle CORS preflight requests
 static esp_err_t mcp_options_handler(httpd_req_t *req) {
@@ -1023,7 +928,7 @@ static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int3
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE
     };
-    esp_err_t err1 = gpio_config(&io_config);
+    gpio_config(&io_config);
 
     ESP_LOGI(TAG, "WASM setting GPIO %d to level %d", pin, level);
     esp_err_t err = gpio_set_level((gpio_num_t)pin, level);
@@ -1119,20 +1024,7 @@ static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char*
 }
 
 // System Info Functions
-static int32_t native_get_tick_count(wasm_exec_env_t exec_env)
-{
-    return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
-}
-
-static int32_t native_get_free_heap(wasm_exec_env_t exec_env)
-{
-    return (int32_t)esp_get_free_heap_size();
-}
-
-static int32_t native_get_uptime_ms(wasm_exec_env_t exec_env)
-{
-    return (int32_t)(esp_timer_get_time() / 1000);
-}
+// System info functions moved to mcp_framework/src/mcp_host_functions.c
 
 // JSON Helper Functions
 static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json, char* method, char* params, int32_t max_len)
@@ -1235,121 +1127,6 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
 }
 
 // Logging Functions
-static int32_t native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Validate pointers first
-    if (!tag || !message) {
-        printf("LOG_INFO: Invalid pointer - tag=%p, message=%p\n", tag, message);
-        return -1;
-    }
-    
-    // Check reasonable string lengths (prevent runaway strings)
-    size_t tag_len = strnlen(tag, 64);      // Max 64 chars for tag
-    size_t msg_len = strnlen(message, 512); // Max 512 chars for message
-    
-    // WAMR Debugging: Get WASM addresses and validate them
-    uint64_t tag_wasm_addr = wasm_runtime_addr_native_to_app(module_inst, (void*)tag);
-    uint64_t msg_wasm_addr = wasm_runtime_addr_native_to_app(module_inst, (void*)message);
-    
-    // Check bounds checking status
-    printf("LOG_INFO: tag_len=%zu, msg_len=%zu\n", tag_len, msg_len);
-    printf("LOG_INFO: tag_wasm_addr=0x%llx, msg_wasm_addr=0x%llx\n", 
-           (unsigned long long)tag_wasm_addr, (unsigned long long)msg_wasm_addr);
-    
-    // Validate string addresses in WAMR
-    bool tag_valid = wasm_runtime_validate_app_str_addr(module_inst, tag_wasm_addr);
-    bool msg_valid = wasm_runtime_validate_app_str_addr(module_inst, msg_wasm_addr);
-    printf("LOG_INFO: tag_valid=%d, msg_valid=%d\n", tag_valid, msg_valid);
-    
-    // Debug: Show what we actually received
-    printf("LOG_INFO: tag='%.*s', message='%.*s'\n", (int)tag_len, tag, (int)msg_len, message);
-    
-    // Raw memory inspection for failing strings
-    if (msg_len == 0) {
-        printf("LOG_INFO: EMPTY STRING DETECTED - Inspecting raw memory\n");
-        
-        // Get native pointer and inspect raw bytes
-        void* native_ptr = wasm_runtime_addr_app_to_native(module_inst, msg_wasm_addr);
-        printf("LOG_INFO: Native ptr for msg_wasm_addr 0x%llx = %p\n", 
-               (unsigned long long)msg_wasm_addr, native_ptr);
-        
-        if (native_ptr) {
-            unsigned char* bytes = (unsigned char*)native_ptr;
-            printf("LOG_INFO: Raw bytes at 0x%llx: ", (unsigned long long)msg_wasm_addr);
-            for (int i = 0; i < 40; i++) {
-                printf("%02x ", bytes[i]);
-                if (i % 16 == 15) printf("| ");
-            }
-            printf("\n");
-            
-            // Also show as characters
-            printf("LOG_INFO: As chars: '");
-            for (int i = 0; i < 40; i++) {
-                char c = bytes[i];
-                if (c == 0) {
-                    printf("\\0");
-                    break;
-                } else if (isprint(c)) {
-                    printf("%c", c);
-                } else {
-                    printf("\\x%02x", (unsigned char)c);
-                }
-            }
-            printf("'\n");
-            
-            // Check if it's just a null terminator at the start
-            if (bytes[0] == 0) {
-                printf("LOG_INFO: String starts with null terminator - truly empty\n");
-                
-                // Get WAMR memory layout information
-                printf("=== WAMR MEMORY LAYOUT DEBUG ===\n");
-                
-                // Use basic information we can get
-                uint32_t total_memory = 65536; // Known WASM memory size
-                printf("MEMORY: total_size=%lu bytes (0x%lx)\n", 
-                       (unsigned long)total_memory, (unsigned long)total_memory);
-                    
-                // Check where our problem addresses fall
-                printf("PROBLEM ADDRESSES:\n");
-                printf("  0x814 = %u decimal (in first %u bytes)\n", 0x814, 0x814);
-                printf("  0x9cb = %u decimal (in first %u bytes)\n", 0x9cb, 0x9cb);
-                    
-                // Show memory regions (estimated)
-                printf("ESTIMATED MEMORY REGIONS:\n");
-                printf("  Data section: 0x0 - ~0x2000 (0-8192)\n");
-                printf("  Stack region: ~0x2000 - ~0x6000 (8192-24576) [4KB stack]\n");
-                printf("  Heap region: ~0x6000+ (24576+) [4KB heap]\n");
-                
-                if (0x814 < 8192) {
-                    printf("  >> 0x814 is in DATA SECTION - should contain strings!\n");
-                }
-                if (0x9cb < 8192) {
-                    printf("  >> 0x9cb is in DATA SECTION - should contain strings!\n");
-                }
-                
-                printf("=== END MEMORY LAYOUT DEBUG ===\n");
-            }
-        } else {
-            printf("LOG_INFO: Failed to get native pointer for WASM address 0x%llx\n", 
-                   (unsigned long long)msg_wasm_addr);
-        }
-    }
-    
-    if (tag_len >= 64) {
-        printf("LOG_INFO: Tag too long (%zu chars)\n", tag_len);
-        return -1;
-    }
-    
-    if (msg_len >= 512) {
-        printf("LOG_INFO: Message too long (%zu chars)\n", msg_len);
-        return -1;
-    }
-    
-    ESP_LOGI(tag, "[WASM] %s", message);
-    return 0;
-}
 
 
 
@@ -1387,93 +1164,12 @@ int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
     return -1;
 }
 
-static int32_t native_log_error(wasm_exec_env_t exec_env, const char* tag, const char* message)
-{
-    // Using automatic string conversion ($$) - no validation needed
-    ESP_LOGE(tag, "[WASM] %s", message);
-    return 0;
-}
 
 // String Functions (C library compatibility)
-static int32_t native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Using automatic string conversion ($$) - no validation needed
-    
-    // Standard strcat implementation
-    char* d = dest;
-    while (*d) d++; // Find end of dest
-    while ((*d++ = *src++)); // Copy src to end of dest
-    
-    // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    return wasm_addr;
-}
 
-// Native strcmp implementation
-static int32_t native_strcmp(wasm_exec_env_t exec_env, const char* s1, const char* s2)
-{
-    // Validate pointers first
-    if (!s1 || !s2) {
-        printf("STRCMP: Invalid pointer - s1=%p, s2=%p\n", s1, s2);
-        return -1;
-    }
-    
-    // Check reasonable string lengths (prevent runaway strings)
-    size_t len1 = strnlen(s1, 256);
-    size_t len2 = strnlen(s2, 256);  
-    
-    if (len1 >= 256) {
-        printf("STRCMP: String s1 too long (%zu chars)\n", len1);
-        return -1;
-    }
-    
-    if (len2 >= 256) {
-        printf("STRCMP: String s2 too long (%zu chars)\n", len2);
-        return -1;
-    }
-    
-    printf("[WASM]: strcmp called!\n");
-    return strcmp(s1, s2);
-}
 
-// Native strlen implementation
-static int32_t native_strlen(wasm_exec_env_t exec_env, const char* s)
-{
-    // Using automatic string conversion ($) - no validation needed
-    return (int32_t)strlen(s);
-}
 
-// Native strncpy implementation
-static int32_t native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Using automatic string conversion ($*i) - src is auto-converted, dest is manual pointer
-    // if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)dest, n)) {
-    //     return 0; // Return 0 on validation failure
-    // }
-    
-    strncpy(dest, src, n);
-    
-    // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    return wasm_addr;
-}
 
-// Native memcpy implementation  
-static int32_t native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src, int32_t n)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Using automatic pointer conversion (**i) - no validation needed
-    memcpy(dest, src, n);
-    
-    // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    return wasm_addr;
-}
 
 // Native memcmp implementation
 static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n)
@@ -1482,73 +1178,9 @@ static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const voi
     return memcmp(s1, s2, n);
 }
 
-// Native strstr implementation
-static int32_t native_strstr(wasm_exec_env_t exec_env, const char* haystack, const char* needle)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Using automatic string conversion ($$) - no validation needed
-    char* result = strstr(haystack, needle);
-    
-    if (!result) {
-        return 0; // Not found
-    }
-    
-    // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, result);
-    return wasm_addr;
-}
 
-// Native malloc implementation
-static uint32_t native_malloc(wasm_exec_env_t exec_env, uint32_t size)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    ESP_LOGI("native_malloc", "Allocating %u bytes", size);
-    
-    // Use WAMR's module malloc function
-    uint32_t wasm_addr = wasm_runtime_module_malloc(module_inst, size, NULL);
-    
-    if (wasm_addr == 0) {
-        ESP_LOGE("native_malloc", "Failed to allocate %u bytes", size);
-    } else {
-        ESP_LOGI("native_malloc", "Allocated %u bytes at WASM address 0x%x", size, wasm_addr);
-    }
-    
-    return wasm_addr;
-}
 
-// Native free implementation  
-static void native_free(wasm_exec_env_t exec_env, uint32_t ptr)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    ESP_LOGI("native_free", "Freeing WASM address 0x%x", ptr);
-    
-    // if (ptr == 0) {
-    //     ESP_LOGW("native_free", "Attempting to free NULL pointer");
-    //     return 0;
-    // }
-    
-    // Use WAMR's module free function
-    wasm_runtime_module_free(module_inst, ptr);
-    //return 0;
-}
 
-// Native strcpy implementation
-static int32_t native_strcpy(wasm_exec_env_t exec_env, char* dest, const char* src)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    
-    // Using automatic string conversion ($$) - no validation needed for src
-    // dest is a pointer that we need to validate
-    // We can't easily validate dest size, so we'll trust the WASM code
-    strcpy(dest, src);
-    
-    // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    return wasm_addr;
-}
 
 // Native strncmp implementation
 static int32_t native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, unsigned long n)
@@ -1557,19 +1189,6 @@ static int32_t native_strncmp(wasm_exec_env_t exec_env, const char* s1, const ch
     return strncmp(s1, s2, n);
 }
 
-// Native snprintf implementation (simplified for WASM compatibility)
-static int32_t native_snprintf(wasm_exec_env_t exec_env, char* buffer, int32_t size, const char* format)
-{
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
-    if (!wasm_runtime_validate_app_addr(module_inst, (uint32_t)buffer, size) ||
-        !wasm_runtime_validate_app_str_addr(module_inst, (uint32_t)format)) {
-        return 0; // Return 0 on validation failure
-    }
-    
-    // For now, implement a basic version that handles the MCP SDK's usage
-    // This is a simplified version - real snprintf has variadic arguments
-    return snprintf(buffer, size, "%s", format);
-}
 
 // Native symbol table - exports native functions to WASM
 static NativeSymbol native_symbols[] = {
