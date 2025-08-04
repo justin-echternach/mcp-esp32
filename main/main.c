@@ -93,8 +93,8 @@ static void register_mcp_endpoints(httpd_handle_t server);
 // ========== MCP Config System ==========
 // Configuration structures now defined in mcp_framework/include/mcp_config.h
 
-// Global MCP configuration
-static mcp_config_t g_mcp_config = {0};
+// Global MCP configuration (accessible to framework)
+mcp_config_t g_mcp_config = {0};
 static bool g_mcp_config_loaded = false;
 
 // ========== JSON Config Loading ==========
@@ -188,48 +188,7 @@ static bool is_gpio_pin_input_only(int pin) {
 // #include "../led_wasm.h"                 // LED control WASM (218 bytes) - LED functions
 // Now loading WASM from SD card instead of embedded header
 
-#define MALLOC_ALIGN_SIZE 8
-
-// ESP32-specific WAMR memory allocation functions (from ESP-WASMachine)
-static void *wamr_malloc(unsigned int size)
-{
-    void *ptr;
-#ifdef CONFIG_SPIRAM
-    uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-#else
-    uint32_t caps = MALLOC_CAP_8BIT;
-#endif
-
-    ptr = heap_caps_aligned_alloc(MALLOC_ALIGN_SIZE, size, caps);
-    ESP_LOGV(TAG, "malloc ptr=%p size=%u", ptr, size);
-
-    return ptr;
-}
-
-static void wamr_free(void *ptr)
-{
-    ESP_LOGV(TAG, "free ptr=%p", ptr);
-    heap_caps_free(ptr);
-}
-
-static void *wamr_realloc(void *ptr, unsigned int size)
-{
-    void *new_ptr;
-
-    new_ptr = wamr_malloc(size);
-    if (new_ptr) {
-        if (ptr) {
-            size_t n = heap_caps_get_allocated_size(ptr);
-            size_t m = MIN(size, n);
-            memcpy(new_ptr, ptr, m);
-            wamr_free(ptr);
-        }
-    }
-
-    ESP_LOGV(TAG, "realloc ptr=%p size=%u new_ptr=%p", ptr, size, new_ptr);
-
-    return new_ptr;
-}
+// WAMR allocators moved to mcp_host_functions framework
 
 // ========== HTTP Server & SSE Functions ==========
 
@@ -834,123 +793,10 @@ static int32_t native_get_tick(wasm_exec_env_t exec_env)
     return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
-// MCP Host Function Interface Implementation
+// GPIO functions moved to mcp_host_functions framework
+// LED state management handled by native_led_control function
 
-// GPIO Control Functions
-static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
-{
-    // Check if pin is protected
-    // if (pin >= 0 && pin < 40) {
-    //     for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
-    //         if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
-    //             ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
-    //             return -1; // Protected pin
-    //         }
-    //     }
-    // }
-
-
-    gpio_config_t io_config = {
-        .pin_bit_mask = (1ULL << pin),
-        .mode = (gpio_mode_t)GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    gpio_config(&io_config);
-
-    ESP_LOGI(TAG, "WASM setting GPIO %d to level %d", pin, level);
-    esp_err_t err = gpio_set_level((gpio_num_t)pin, level);
-
-    ESP_LOGI(TAG, "WASM set GPIO %d to level %d, result=%d", pin, level, err);
-    
-    // Update LED state if this is the LED pin
-    if (pin == LED_GPIO && g_led_state_mutex) {
-        if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            bool new_state = level ? true : false;
-            if (g_led_state != new_state) {
-                g_led_state = new_state;
-                g_led_state_changed = true;
-            }
-            xSemaphoreGive(g_led_state_mutex);
-        }
-    }
-    
-    return err == ESP_OK ? 0 : -2;
-}
-
-static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
-{
-    if (pin < 0 || pin >= 40) {
-        return -1; // Invalid pin
-    }
-    
-    return gpio_get_level((gpio_num_t)pin);
-}
-
-static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
-{
-    // Check if pin is protected
-    // if (pin >= 0 && pin < 40) {
-    //     for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
-    //         if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
-    //             ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
-    //             return -1;
-    //         }
-    //     }
-        
-    //     // Check if pin is input-only
-    //     for (int i = 0; i < g_mcp_config.gpio_protection.input_only_pin_count; i++) {
-    //         if (g_mcp_config.gpio_protection.input_only_pins[i] == pin && direction != GPIO_MODE_INPUT) {
-    //             ESP_LOGW(TAG, "GPIO pin %d is input-only, output mode denied", pin);
-    //             return -2;
-    //         }
-    //     }
-    // }
-    
-    // Use comprehensive GPIO configuration instead of just setting direction
-    gpio_config_t io_config = {
-        .pin_bit_mask = (1ULL << pin),
-        .mode = (gpio_mode_t)direction,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-    esp_err_t err = gpio_config(&io_config);
-    
-    ESP_LOGI(TAG, "WASM configured GPIO %d with comprehensive setup, mode=%d, result=%d", pin, direction, err);
-    return err == ESP_OK ? 0 : -3;
-}
-
-static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
-{
-    for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
-        if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
-            return 1; // Protected
-        }
-    }
-    return 0; // Not protected
-}
-
-// SSE Event Functions
-static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
-{
-    // Using automatic string conversion ($$) - no validation needed
-    ESP_LOGI(TAG, "WASM sending SSE event: %s = %s", event_type, data);
-    send_sse_event(event_type, data);
-    return 0;
-}
-
-static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
-{
-    // Using automatic string conversion ($$) - no validation needed
-    
-    // Create JSON-formatted tool result
-    char event_data[512];
-    snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
-    send_sse_event("tool_result", event_data);
-    return 0;
-}
+// SSE functions moved to mcp_host_functions framework
 
 // System Info Functions
 // System info functions moved to mcp_framework/src/mcp_host_functions.c
@@ -1120,56 +966,25 @@ static int32_t native_strncmp(wasm_exec_env_t exec_env, const char* s1, const ch
 
 
 // Native symbol table - exports native functions to WASM
-static NativeSymbol native_symbols[] = {
-    // Legacy functions
+// Application-specific native functions (framework functions are registered separately)
+static NativeSymbol app_native_symbols[] = {
+    // Application-specific LED control and timing
     {"led_control", native_led_control, "(i)i", NULL},
     {"get_tick", native_get_tick, "()i", NULL},
     
-    // GPIO Control
-    {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
-    {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
-    {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
-    {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
-    
-    // SSE Events
-    {"sse_send_event", native_sse_send_event, "($$)i", NULL},
-    {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
-    
-    // System Info (using framework functions)
-    {"get_tick_count", mcp_native_get_tick_count, "()i", NULL},
-    {"get_free_heap", mcp_native_get_free_heap, "()i", NULL},
-    {"get_uptime_ms", mcp_native_get_uptime_ms, "()i", NULL},
-    
-    // JSON Helper Functions
+    // MCP JSON Helper Functions (application-specific)
     {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
     {"json_create_response", native_json_create_response, "($*~)i", NULL},
     {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
-    
-    // Logging (using framework functions)
-    {"log_info", mcp_native_log_info, "($$)i", NULL},
-    {"log_error", mcp_native_log_error, "($$)i", NULL},
     
     // Debug logging functions (temporary)
     {"log_info2", native_log_info2, "(i)i", NULL},
     {"log_info3", native_log_info3, "(*~)i", NULL},
     
-    // String Functions (using framework functions)
-    {"wasm_strcmp", mcp_native_strcmp, "($$)i", NULL},
-    {"strlen", mcp_native_strlen, "($)i", NULL},
-    {"strcat", mcp_native_strcat, "($$)i", NULL},
-    {"strcpy", mcp_native_strcpy, "($$)i", NULL},
-    {"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
-    {"strstr", mcp_native_strstr, "($$)i", NULL},
-    {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
-    
     // String functions not in framework (project-specific)
     {"strncmp", native_strncmp, "($$i)i", NULL},
-    {"memcmp", native_memcmp, "(**i)i", NULL},
-    
-    // Memory allocation functions (using framework functions)
-    {"malloc", mcp_native_malloc, "(i)i", NULL},
-    {"free", mcp_native_free, "(i)", NULL}
-    // Note: snprintf removed - too complex for WAMR (variadic function)
+    {"memcmp", native_memcmp, "(**i)i", NULL}
+    // Note: Framework provides: gpio_*, sse_*, log_*, strlen, strcmp, strcpy, strcat, strncpy, strstr, memcpy, malloc, free
 };
 
 // Helper function to create execution environment matching instantiation
@@ -1406,17 +1221,22 @@ void iwasm_main(void *arg)
     // gpio_set_level(LED_GPIO, 0);
     // ESP_LOGI(TAG, "LED GPIO %d initialized to OFF state", LED_GPIO);
 
-    // Configure ESP32-specific memory allocation (from ESP-WASMachine)
+    // Configure ESP32-specific memory allocation using framework allocators
     memset(&init_args, 0, sizeof(RuntimeInitArgs));
     init_args.mem_alloc_type = Alloc_With_Allocator;
-    init_args.mem_alloc_option.allocator.malloc_func = wamr_malloc;
-    init_args.mem_alloc_option.allocator.realloc_func = wamr_realloc;
-    init_args.mem_alloc_option.allocator.free_func = wamr_free;
     
-    // Register native symbols
+    // Get ESP32-specific allocators from framework
+    void *malloc_func = NULL, *realloc_func = NULL, *free_func = NULL;
+    mcp_get_wamr_allocators(&malloc_func, &realloc_func, &free_func);
+    
+    init_args.mem_alloc_option.allocator.malloc_func = malloc_func;
+    init_args.mem_alloc_option.allocator.realloc_func = realloc_func;
+    init_args.mem_alloc_option.allocator.free_func = free_func;
+    
+    // Register native symbols - use framework functions as the main set
     init_args.native_module_name = "env";
-    init_args.n_native_symbols = sizeof(native_symbols) / sizeof(NativeSymbol);
-    init_args.native_symbols = native_symbols;
+    init_args.n_native_symbols = mcp_core_host_functions_count;
+    init_args.native_symbols = mcp_core_host_functions;
     
     ESP_LOGI(TAG, "Initializing WASM runtime with ESP32 allocator");
     if (!wasm_runtime_full_init(&init_args)) {
@@ -1425,6 +1245,15 @@ void iwasm_main(void *arg)
     }
     
     ESP_LOGI(TAG, "WASM runtime initialized successfully");
+    
+    // Register application-specific native functions
+    if (!wasm_runtime_register_natives("env", app_native_symbols, 
+                                       sizeof(app_native_symbols) / sizeof(NativeSymbol))) {
+        ESP_LOGW(TAG, "Failed to register app-specific native functions (continuing anyway)");
+    } else {
+        ESP_LOGI(TAG, "Registered %d app-specific native functions", 
+                 (int)(sizeof(app_native_symbols) / sizeof(NativeSymbol)));
+    }
     
     // Initialize MCP pthread pool for concurrent request handling
     ESP_LOGI(TAG, "Initializing MCP pthread pool...");
