@@ -152,6 +152,20 @@ int32_t mcp_native_get_uptime_ms(wasm_exec_env_t exec_env);
  */
 int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
 
+// ========== WAMR Runtime Memory Allocators (ESP32-specific) ==========
+
+/**
+ * @brief Get ESP32-specific WAMR memory allocator functions
+ * 
+ * These functions use ESP32 heap capabilities with SPIRAM support
+ * for optimal memory allocation in WAMR runtime
+ * 
+ * @param malloc_func Pointer to receive malloc function
+ * @param realloc_func Pointer to receive realloc function  
+ * @param free_func Pointer to receive free function
+ */
+void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** free_func);
+
 // ========== Host Function Registration ==========
 
 /**

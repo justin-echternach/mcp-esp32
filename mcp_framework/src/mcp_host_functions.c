@@ -7,10 +7,61 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "driver/gpio.h"
+#include "mcp_config.h"
+#include "mcp_http_server.h"
 
 static const char* TAG = "MCP_HOST";
 
-// ========== Memory Management Functions ==========
+// WASM memory alignment size
+#define MALLOC_ALIGN_SIZE 8
+
+// MIN macro if not defined
+#ifndef MIN
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#endif
+
+// External global reference (from main.c)
+extern mcp_config_t g_mcp_config;
+
+// ========== WAMR Runtime Memory Allocators (ESP32-specific) ==========
+
+static void *wamr_malloc(unsigned int size)
+{
+    void *ptr;
+#ifdef CONFIG_SPIRAM
+    uint32_t caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#else
+    uint32_t caps = MALLOC_CAP_8BIT;
+#endif
+    ptr = heap_caps_aligned_alloc(MALLOC_ALIGN_SIZE, size, caps);
+    ESP_LOGV(TAG, "malloc ptr=%p size=%u", ptr, size);
+    return ptr;
+}
+
+static void wamr_free(void *ptr)
+{
+    ESP_LOGV(TAG, "free ptr=%p", ptr);
+    heap_caps_free(ptr);
+}
+
+static void *wamr_realloc(void *ptr, unsigned int size)
+{
+    void *new_ptr;
+    new_ptr = wamr_malloc(size);
+    if (new_ptr) {
+        if (ptr) {
+            size_t n = heap_caps_get_allocated_size(ptr);
+            size_t m = MIN(size, n);
+            memcpy(new_ptr, ptr, m);
+            wamr_free(ptr);
+        }
+    }
+    ESP_LOGV(TAG, "realloc ptr=%p size=%u new_ptr=%p", ptr, size, new_ptr);
+    return new_ptr;
+}
+
+// ========== WASM Memory Management Functions ==========
 
 uint32_t mcp_native_malloc(wasm_exec_env_t exec_env, uint32_t size) {
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
@@ -183,6 +234,107 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env) {
     return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+// ========== GPIO Functions (ESP32-specific) ==========
+
+static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
+{
+    // Check if pin is protected
+    if (pin >= 0 && pin < 40) {
+        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+                ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
+                return -1; // Protected pin
+            }
+        }
+    }
+
+    if (pin < 0 || pin >= 40) {
+        return -1; // Invalid pin
+    }
+
+    esp_err_t result = gpio_set_level((gpio_num_t)pin, level);
+    return (result == ESP_OK) ? 0 : -1;
+}
+
+static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
+{
+    if (pin < 0 || pin >= 40) {
+        return -1; // Invalid pin
+    }
+    
+    return gpio_get_level((gpio_num_t)pin);
+}
+
+static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
+{
+    // Check if pin is protected
+    if (pin >= 0 && pin < 40) {
+        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+                ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
+                return -1;
+            }
+        }
+    }
+
+    if (pin < 0 || pin >= 40) {
+        return -1; // Invalid pin
+    }
+
+    gpio_mode_t mode;
+    switch (direction) {
+        case 0: mode = GPIO_MODE_INPUT; break;
+        case 1: mode = GPIO_MODE_OUTPUT; break;
+        case 2: mode = GPIO_MODE_INPUT_OUTPUT; break;
+        default: return -1; // Invalid direction
+    }
+
+    esp_err_t result = gpio_set_direction((gpio_num_t)pin, mode);
+    return (result == ESP_OK) ? 0 : -1;
+}
+
+static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
+{
+    for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+        if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+            return 1; // Protected
+        }
+    }
+    return 0; // Not protected
+}
+
+// ========== WAMR Memory Allocator Access Functions ==========
+
+void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** free_func) {
+    if (malloc_func) *malloc_func = (void*)wamr_malloc;
+    if (realloc_func) *realloc_func = (void*)wamr_realloc;  
+    if (free_func) *free_func = (void*)wamr_free;
+}
+
+// ========== SSE Event Functions (MCP Protocol) ==========
+
+static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
+{
+    // Using automatic string conversion ($$) - no validation needed
+    ESP_LOGI(TAG, "WASM sending SSE event: %s = %s", event_type, data);
+    // TODO: Implement send_sse_event function or move to application-specific code
+    ESP_LOGW(TAG, "SSE event sending not implemented yet");
+    return 0;
+}
+
+static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
+{
+    // Using automatic string conversion ($$) - no validation needed
+    
+    // Create JSON-formatted tool result
+    char event_data[512];
+    snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
+    // TODO: Implement send_sse_event function or move to application-specific code
+    ESP_LOGI(TAG, "WASM tool result: %s", event_data);
+    ESP_LOGW(TAG, "SSE tool result sending not implemented yet");
+    return 0;
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -209,6 +361,16 @@ NativeSymbol mcp_core_host_functions[] = {
     {"get_free_heap", mcp_native_get_free_heap, "()i", NULL},
     {"get_uptime_ms", mcp_native_get_uptime_ms, "()i", NULL},
     {"get_tick_count", mcp_native_get_tick_count, "()i", NULL},
+    
+    // GPIO Control (ESP32-specific but reusable)
+    {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
+    {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
+    {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
+    {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
+    
+    // SSE Events (MCP Protocol)
+    {"sse_send_event", native_sse_send_event, "($$)i", NULL},
+    {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);
