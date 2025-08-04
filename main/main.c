@@ -22,6 +22,7 @@
 // MCP Framework includes
 #include "../mcp_framework/include/mcp_config.h"
 #include "../mcp_framework/include/mcp_config_loader.h"
+#include "../mcp_framework/include/mcp_host_functions.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
 
 // SD Card includes
@@ -1586,39 +1587,40 @@ static NativeSymbol native_symbols[] = {
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},
     {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
     
-    // System Info
-    {"get_tick_count", native_get_tick_count, "()i", NULL},
-    {"get_free_heap", native_get_free_heap, "()i", NULL},
-    {"get_uptime_ms", native_get_uptime_ms, "()i", NULL},
+    // System Info (using framework functions)
+    {"get_tick_count", mcp_native_get_tick_count, "()i", NULL},
+    {"get_free_heap", mcp_native_get_free_heap, "()i", NULL},
+    {"get_uptime_ms", mcp_native_get_uptime_ms, "()i", NULL},
     
     // JSON Helper Functions
     {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
     {"json_create_response", native_json_create_response, "($*~)i", NULL},
     {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
     
-    // Logging
-    {"log_info", native_log_info, "($$)i", NULL},
+    // Logging (using framework functions)
+    {"log_info", mcp_native_log_info, "($$)i", NULL},
+    {"log_error", mcp_native_log_error, "($$)i", NULL},
     
-
+    // Debug logging functions (temporary)
     {"log_info2", native_log_info2, "(i)i", NULL},
     {"log_info3", native_log_info3, "(*~)i", NULL},
-
-    {"log_error", native_log_error, "($$)i", NULL},
     
-    // String Functions (C library compatibility)  
-    {"wasm_strcmp", native_strcmp, "($$)i", NULL},
-    {"strlen", native_strlen, "($)i", NULL},
-    {"strcat", native_strcat, "($$)i", NULL},
-    {"strcpy", native_strcpy, "($*)i", NULL},
-    {"wasm_strncpy", native_strncpy, "($*i)i", NULL},
+    // String Functions (using framework functions)
+    {"wasm_strcmp", mcp_native_strcmp, "($$)i", NULL},
+    {"strlen", mcp_native_strlen, "($)i", NULL},
+    {"strcat", mcp_native_strcat, "($$)i", NULL},
+    {"strcpy", mcp_native_strcpy, "($$)i", NULL},
+    {"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
+    {"strstr", mcp_native_strstr, "($$)i", NULL},
+    {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
+    
+    // String functions not in framework (project-specific)
     {"strncmp", native_strncmp, "($$i)i", NULL},
-    {"memcpy", native_memcpy, "(**i)i", NULL},
     {"memcmp", native_memcmp, "(**i)i", NULL},
-    {"strstr", native_strstr, "($$)i", NULL},
     
-    // Memory allocation functions
-    {"malloc", native_malloc, "(i)i", NULL},
-    {"free", native_free, "(*)", NULL}
+    // Memory allocation functions (using framework functions)
+    {"malloc", mcp_native_malloc, "(i)i", NULL},
+    {"free", mcp_native_free, "(i)", NULL}
     // Note: snprintf removed - too complex for WAMR (variadic function)
 };
 
