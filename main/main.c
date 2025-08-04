@@ -87,7 +87,6 @@ static SemaphoreHandle_t g_led_state_mutex = NULL;
 static bool g_led_blink_enabled = false;
 
 // Forward declaration for WASM functions
-static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv);
 static void register_mcp_endpoints(httpd_handle_t server);
 
 // ========== MCP Config System ==========
@@ -300,43 +299,6 @@ static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
 static int g_mcp_module_count = 0;
 static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-// Debug function to dump all WASM module exports
-static void dump_wasm_exports(wasm_module_t module, const char* module_name) {
-    if (!module) {
-        ESP_LOGW(TAG, "Cannot dump exports: module is NULL");
-        return;
-    }
-    
-    int32_t export_count = wasm_runtime_get_export_count(module);
-    ESP_LOGI(TAG, "🔍 WASM Module '%s' has %d exports:", module_name, export_count);
-    
-    if (export_count <= 0) {
-        ESP_LOGW(TAG, "  No exports found or error getting export count");
-        return;
-    }
-    
-    for (int32_t i = 0; i < export_count; i++) {
-        wasm_export_t export_info;
-        wasm_runtime_get_export_type(module, i, &export_info);
-        
-        const char* kind_str = "unknown";
-        switch (export_info.kind) {
-            case WASM_IMPORT_EXPORT_KIND_FUNC: kind_str = "function"; break;
-            case WASM_IMPORT_EXPORT_KIND_GLOBAL: kind_str = "global"; break;
-            case WASM_IMPORT_EXPORT_KIND_MEMORY: kind_str = "memory"; break;
-            case WASM_IMPORT_EXPORT_KIND_TABLE: kind_str = "table"; break;
-        }
-        
-        ESP_LOGI(TAG, "  [%d] %s: '%s'", i, kind_str, export_info.name ? export_info.name : "<null>");
-        
-        // Special highlight for mcp_req
-        if (export_info.name && strcmp(export_info.name, "mcp_req") == 0) {
-            ESP_LOGI(TAG, "  ✅ Found mcp_req export!");
-        }
-    }
-    
-    ESP_LOGI(TAG, "🔍 Export dump complete for '%s'", module_name);
-}
 
 // Load WASM module for MCP route
 mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
@@ -593,7 +555,7 @@ mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_file
     }
     
     // Debug: Dump all WASM exports to diagnose function lookup issues
-    dump_wasm_exports(module->wasm_module, wasm_filename);
+    mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
     
     ESP_LOGI(TAG, "🔍 DEBUG: About to unlock mutex and test function lookup");
     ESP_LOGI(TAG, "🔍 DEBUG: g_mcp_module_count = %d", g_mcp_module_count);
@@ -670,7 +632,7 @@ static esp_err_t led_toggle_handler(httpd_req_t *req) {
         wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
         if (led_toggle_func) {
             uint32_t argv[1] = {0}; // argument for led_toggle function
-            if (safe_wasm_call(g_exec_env, led_toggle_func, 1, argv)) {
+            if (mcp_wasm_safe_call(g_exec_env, led_toggle_func, 1, argv)) {
                 int led_result = argv[0];
                 ESP_LOGI(TAG, "HTTP API: WASM LED toggle executed! LED %s", led_result ? "ON" : "OFF");
                 resp = led_result ? "{\"led\":\"on\"}" : "{\"led\":\"off\"}";
@@ -987,202 +949,9 @@ static NativeSymbol app_native_symbols[] = {
     // Note: Framework provides: gpio_*, sse_*, log_*, strlen, strcmp, strcpy, strcat, strncpy, strstr, memcpy, malloc, free
 };
 
-// Helper function to create execution environment matching instantiation
-static wasm_exec_env_t create_exec_env_minimal(wasm_module_inst_t module_inst) {
-    // Use same stack size as instantiation like the examples
-    uint32_t stack_size = 8192;
-    
-    wasm_exec_env_t env = wasm_runtime_create_exec_env(module_inst, stack_size);
-    if (env) {
-        ESP_LOGI(TAG, "✅ Created exec env with %d byte stack", stack_size);
-        return env;
-    }
-    
-    ESP_LOGE(TAG, "❌ Exec env creation failed with %d byte stack", stack_size);
-    return NULL;
-}
 
-// SD card mount function - trying SPI mode for better reliability
-static bool mount_sd_card(void) {
-    sdmmc_card_t *card;
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024  // Use official example's 16K instead of 32K
-    };
-    
-    ESP_LOGI(TAG, "Trying SPI mode first for better compatibility...");
-    
-    // Initialize SPI bus first
-    spi_bus_config_t bus_cfg = {
-        .mosi_io_num = GPIO_NUM_23,    // MOSI
-        .miso_io_num = GPIO_NUM_19,    // MISO  
-        .sclk_io_num = GPIO_NUM_18,    // SCLK
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 4000,
-    };
-    
-    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &bus_cfg, SDSPI_DEFAULT_DMA);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize SPI bus: %s", esp_err_to_name(ret));
-        return false;
-    }
-    
-    // Configure SPI SD card
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.max_freq_khz = 10000;  // Start with slow speed
-    
-    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slot_config.gpio_cs = GPIO_NUM_5;    // Chip Select
-    slot_config.host_id = host.slot;
-    
-    ESP_LOGI(TAG, "Using SPI pins: CLK=18, MOSI=23, MISO=19, CS=5");
-    
-    ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &card);
-    
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "✅ SD card mounted successfully via SPI");
-        ESP_LOGI(TAG, "SD card info: Name: %s, Type: %s, Capacity: %lluMB", 
-                card->cid.name, 
-                (card->ocr & (1<<30)) ? "SDHC/SDXC" : "SDSC",  // Bit 30 indicates SDHC
-                ((uint64_t) card->csd.capacity) * card->csd.sector_size / (1024 * 1024));
-        return true;
-    }
-    
-    ESP_LOGW(TAG, "SPI mount failed: %s", esp_err_to_name(ret));
-    ESP_LOGI(TAG, "Falling back to SDMMC mode...");
-    
-    // Clean up SPI bus before trying SDMMC
-    spi_bus_free(SPI2_HOST);
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    // Try SDMMC as fallback - use polling mode to avoid DMA timeout issues
-    sdmmc_host_t sdmmc_host = SDMMC_HOST_DEFAULT();
-    sdmmc_slot_config_t sdmmc_slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
-    
-    // Use official ESP32 SDMMC pin configuration
-    sdmmc_slot_config.width = 1;  // 1-bit mode for better compatibility
-    sdmmc_slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
-    
-    // Set correct GPIO pins for ESP32 (from official example)
-    sdmmc_slot_config.clk = GPIO_NUM_14;   // CLK pin
-    sdmmc_slot_config.cmd = GPIO_NUM_15;   // CMD pin  
-    sdmmc_slot_config.d0 = GPIO_NUM_2;     // D0 pin
-    
-    ESP_LOGI(TAG, "SDMMC: Using official ESP32 pins - CLK=14, CMD=15, D0=2");
-    
-    ret = esp_vfs_fat_sdmmc_mount("/sdcard", &sdmmc_host, &sdmmc_slot_config, &mount_config, &card);
-    
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "✅ SD card mounted successfully via SDMMC fallback");
-    
-    // Initialize MCP configuration system now that SD card is mounted
-    if (!init_mcp_config()) {
-        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
-        // Continue anyway with defaults
-    } else {
-        ESP_LOGI(TAG, "MCP configuration system initialized");
-    }
-        return true;
-    } else {
-        ESP_LOGE(TAG, "❌ Both SPI and SDMMC modes failed: %s", esp_err_to_name(ret));
-        ESP_LOGI(TAG, "Check SD card insertion, formatting (FAT32), and connections");
-        return false;
-    }
-}
 
-// Load WASM file from SD card
-static uint8_t* load_wasm_from_sd(const char* filename, unsigned* file_size) {
-    ESP_LOGI(TAG, "Attempting direct WASM file load (skipping directory listing)...");
-    
-    // Add delay to let SD card stabilize after mount
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "/sdcard/wasm/%s", filename);
-    
-    ESP_LOGI(TAG, "Loading WASM file: %s", filepath);
-    
-    // Try to access the file with detailed error reporting
-    ESP_LOGI(TAG, "Attempting to open file: %s", filepath);
-    
-    FILE* file = fopen(filepath, "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "❌ Failed to open WASM file: %s", filepath);
-        ESP_LOGI(TAG, "Error details: %s", strerror(errno));
-        
-        // Try just opening the directory to see if it exists
-        DIR *wasm_dir = opendir("/sdcard/wasm");
-        if (wasm_dir) {
-            ESP_LOGI(TAG, "✅ /sdcard/wasm directory exists, checking contents:");
-            struct dirent *entry;
-            int file_count = 0;
-            while ((entry = readdir(wasm_dir)) != NULL) {
-                ESP_LOGI(TAG, "  Found: %s", entry->d_name);
-                file_count++;
-            }
-            ESP_LOGI(TAG, "Total files in /wasm/: %d", file_count);
-            closedir(wasm_dir);
-        } else {
-            ESP_LOGE(TAG, "❌ /sdcard/wasm directory does not exist!");
-            ESP_LOGI(TAG, "Directory error: %s", strerror(errno));
-        }
-        
-        return NULL;
-    }
-    
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    if (size <= 0) {
-        ESP_LOGE(TAG, "❌ Invalid WASM file size: %ld", size);
-        fclose(file);
-        return NULL;
-    }
-    
-    // Allocate buffer
-    uint8_t* buffer = (uint8_t*)malloc(size);
-    if (!buffer) {
-        ESP_LOGE(TAG, "❌ Failed to allocate memory for WASM file (%ld bytes)", size);
-        fclose(file);
-        return NULL;
-    }
-    
-    // Read file
-    size_t bytes_read = fread(buffer, 1, size, file);
-    fclose(file);
-    
-    if (bytes_read != size) {
-        ESP_LOGE(TAG, "❌ Failed to read WASM file completely. Expected: %ld, Read: %zu", size, bytes_read);
-        free(buffer);
-        return NULL;
-    }
-    
-    *file_size = (unsigned)size;
-    ESP_LOGI(TAG, "✅ Successfully loaded WASM file: %s (%u bytes)", filename, *file_size);
-    return buffer;
-}
 
-// Safe WASM function call wrapper (returns false on pthread errors)
-static bool safe_wasm_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, uint32_t argc, uint32_t *argv) {
-    if (!exec_env || !func) return false;
-    
-    ESP_LOGD(TAG, "Attempting WASM function call...");
-    
-    // Try the call - this may crash due to threading issues
-    bool result = wasm_runtime_call_wasm(exec_env, func, argc, argv);
-    
-    if (result) {
-        ESP_LOGD(TAG, "WASM call succeeded");
-    } else {
-        ESP_LOGD(TAG, "WASM call failed");
-    }
-    
-    return result;
-}
 
 
 void iwasm_main(void *arg)
@@ -1202,9 +971,17 @@ void iwasm_main(void *arg)
     bool wasm_available = false;
 
     // Mount SD card first
-    if (!mount_sd_card()) {
+    if (!mcp_wasm_mount_sd_card()) {
         ESP_LOGE(TAG, "Failed to mount SD card, cannot load WASM from SD");
         goto no_wasm_fallback;
+    }
+    
+    // Initialize MCP configuration system now that SD card is mounted
+    if (!init_mcp_config()) {
+        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
+        // Continue anyway with defaults
+    } else {
+        ESP_LOGI(TAG, "MCP configuration system initialized");
     }
 
     // Configure GPIO for LED
@@ -1269,11 +1046,11 @@ void iwasm_main(void *arg)
     
     // Load WASM file from SD card instead of embedded header
     // Try the 8.3 FAT32 short filename first
-    wasm_file_buf = load_wasm_from_sd("led.was", &wasm_file_buf_size);
+    wasm_file_buf = mcp_wasm_load_from_sd("led.was", &wasm_file_buf_size);
     if (!wasm_file_buf) {
         // If that fails, try the long filename
         ESP_LOGI(TAG, "Short filename failed, trying long filename...");
-        wasm_file_buf = load_wasm_from_sd("led_control.wasm", &wasm_file_buf_size);
+        wasm_file_buf = mcp_wasm_load_from_sd("led_control.wasm", &wasm_file_buf_size);
     }
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to load WASM from SD card");
@@ -1305,7 +1082,7 @@ void iwasm_main(void *arg)
 
     // Try creating exec env now that we have pthread context
     ESP_LOGI(TAG, "Creating execution environment with pthread context");
-    exec_env = create_exec_env_minimal(wasm_module_inst);
+    exec_env = mcp_wasm_create_exec_env(wasm_module_inst);
     
     if (!exec_env) {
         ESP_LOGW(TAG, "Failed to create execution environment even with pthread context");
@@ -1326,7 +1103,7 @@ void iwasm_main(void *arg)
     g_wasm_available = wasm_available;
     
     // Debug: Dump LED WASM exports for comparison
-    // dump_wasm_exports(wasm_module, "led.was");
+    // mcp_wasm_dump_exports(wasm_module, "led.was");
     
     // Test WASM LED function execution in pthread context
     // if (exec_env) {
@@ -1335,7 +1112,7 @@ void iwasm_main(void *arg)
     //     // Test LED on function
     //     wasm_function_inst_t led_on_func = wasm_runtime_lookup_function(wasm_module_inst, "led_on");
     //     if (led_on_func) {
-    //         if (safe_wasm_call(exec_env, led_on_func, 0, NULL)) {
+    //         if (mcp_wasm_safe_call(exec_env, led_on_func, 0, NULL)) {
     //             ESP_LOGI(TAG, "✅ WASM led_on() executed - LED should be ON");
     //             vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED on for 500ms
     //         } else {
@@ -1346,7 +1123,7 @@ void iwasm_main(void *arg)
     //     // Test LED off function
     //     wasm_function_inst_t led_off_func = wasm_runtime_lookup_function(wasm_module_inst, "led_off");
     //     if (led_off_func) {
-    //         if (safe_wasm_call(exec_env, led_off_func, 0, NULL)) {
+    //         if (mcp_wasm_safe_call(exec_env, led_off_func, 0, NULL)) {
     //             ESP_LOGI(TAG, "✅ WASM led_off() executed - LED should be OFF");
     //             vTaskDelay(500 / portTICK_PERIOD_MS); // Show LED off for 500ms
     //         } else {
@@ -1397,7 +1174,7 @@ main_loop:
             wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
             if (led_toggle_func) {
                 uint32_t argv[1] = {count};
-                if (safe_wasm_call(g_exec_env, led_toggle_func, 1, argv)) {
+                if (mcp_wasm_safe_call(g_exec_env, led_toggle_func, 1, argv)) {
                     int led_result = argv[0];
                     ESP_LOGI(TAG, "🟢 WASM LED toggle executed! LED %s (count: %d)", 
                             led_result ? "ON" : "OFF", count++);
@@ -1413,7 +1190,7 @@ main_loop:
                     wasm_runtime_lookup_function(g_wasm_module_inst, "led_off");
                     
                 if (led_func) {
-                    if (safe_wasm_call(g_exec_env, led_func, 0, NULL)) {
+                    if (mcp_wasm_safe_call(g_exec_env, led_func, 0, NULL)) {
                         ESP_LOGI(TAG, "🟢 WASM LED %s executed (count: %d)", 
                                 led_state ? "ON" : "OFF", count++);
                     } else {

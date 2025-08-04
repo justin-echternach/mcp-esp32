@@ -55,6 +55,26 @@ void mcp_wasm_runtime_cleanup(mcp_wasm_runtime_t *runtime);
 // Get last error message
 const char* mcp_wasm_get_last_error(mcp_wasm_runtime_t *runtime);
 
+// ========== SD Card and File Operations ==========
+
+// Mount SD card for WASM file access
+bool mcp_wasm_mount_sd_card(void);
+
+// Load WASM file from SD card
+uint8_t* mcp_wasm_load_from_sd(const char* filename, unsigned* file_size);
+
+// ========== WASM Execution Utilities ==========
+
+// Create execution environment with optimal settings
+wasm_exec_env_t mcp_wasm_create_exec_env(wasm_module_inst_t module_inst);
+
+// Safe WASM function call wrapper (handles threading issues)
+bool mcp_wasm_safe_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, 
+                        uint32_t argc, uint32_t *argv);
+
+// Debug: Dump WASM module exports for inspection
+void mcp_wasm_dump_exports(wasm_module_t module, const char* module_name);
+
 #ifdef __cplusplus
 }
 #endif
