@@ -108,53 +108,19 @@ static bool init_mcp_config(void) {
         return true;
     }
     
-    // Initialize with defaults first
-    if (!mcp_config_init_defaults(&g_mcp_config)) {
-        ESP_LOGE(TAG, "Failed to initialize MCP config defaults");
+    // Use framework function with default fallback route
+    if (!mcp_config_init_with_fallback(&g_mcp_config, "/mcp", "led_ctrl.was")) {
+        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
         return false;
     }
     
-    // Try to load from SD card first
-    ESP_LOGI(TAG, "Attempting to load MCP config from SD card...");
-    if (mcp_config_load_from_file(&g_mcp_config, "/sdcard/cfg.jsn")) {
-        ESP_LOGI(TAG, "MCP config loaded from SD card");
-        g_mcp_config_loaded = true;
-        
-        // Register MCP endpoints now that config is loaded
-        register_mcp_endpoints(server);
-        
-        return true;
-    }
-    
-    // Also try without extension in case of FAT32 8.3 filename issues
-    ESP_LOGI(TAG, "Trying alternative config filename...");
-    if (mcp_config_load_from_file(&g_mcp_config, "/sdcard/mcp_config.json")) {
-        ESP_LOGI(TAG, "MCP config loaded from SD card (full filename)");
-        g_mcp_config_loaded = true;
-        
-        // Register MCP endpoints now that config is loaded
-        register_mcp_endpoints(server);
-        
-        return true;
-    }
-    
-    // Try to load from SPIFFS/NVS (embedded)
-    if (mcp_config_load_from_file(&g_mcp_config, "/spiffs/cfg.jsn")) {
-        ESP_LOGI(TAG, "MCP config loaded from embedded storage");
-        g_mcp_config_loaded = true;
-        return true;
-    }
-    
-    ESP_LOGW(TAG, "No MCP config file found, using defaults");
-    
-    // Add a default route for fallback
-    if (g_mcp_config.route_count == 0) {
-        strncpy(g_mcp_config.routes[0].route, "/mcp", MAX_ROUTE_LENGTH - 1);
-        strncpy(g_mcp_config.routes[0].wasm_file, "led_ctrl.was", MAX_FILENAME_LENGTH - 1);
-        g_mcp_config.route_count = 1;
-    }
-    
     g_mcp_config_loaded = true;
+    
+    // Register MCP endpoints now that config is loaded (if server is available)
+    if (server) {
+        register_mcp_endpoints(server);
+    }
+    
     return true;
 }
 
@@ -505,23 +471,11 @@ int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
 
 
 
-// Native memcmp implementation
-static int32_t native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n)
-{
-    // Using automatic pointer conversion (**i) - no validation needed
-    return memcmp(s1, s2, n);
-}
 
 
 
 
 
-// Native strncmp implementation
-static int32_t native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, unsigned long n)
-{
-    // Using automatic string conversion ($$) - no validation needed
-    return strncmp(s1, s2, n);
-}
 
 
 // Native symbol table - exports native functions to WASM
@@ -536,9 +490,7 @@ static NativeSymbol app_native_symbols[] = {
     {"log_info2", native_log_info2, "(i)i", NULL},
     {"log_info3", native_log_info3, "(*~)i", NULL},
     
-    // String functions not in framework (project-specific)
-    {"strncmp", native_strncmp, "($$i)i", NULL},
-    {"memcmp", native_memcmp, "(**i)i", NULL}
+    // Note: strncmp and memcmp now provided by framework
     // Note: Framework provides: gpio_*, sse_*, log_*, strlen, strcmp, strcpy, strcat, strncpy, strstr, memcpy, malloc, free
 };
 

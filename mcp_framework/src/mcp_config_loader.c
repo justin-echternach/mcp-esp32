@@ -305,3 +305,67 @@ bool mcp_config_load_from_file(mcp_config_t* config, const char* filepath) {
     free(config_json);
     return result;
 }
+
+bool mcp_config_init_with_fallback(mcp_config_t* config, 
+                                   const char* default_route, 
+                                   const char* default_wasm_file) {
+    if (!config) {
+        return false;
+    }
+    
+    ESP_LOGI(TAG, "Initializing MCP config with smart fallback");
+    
+    // Start with defaults
+    if (!mcp_config_init_defaults(config)) {
+        ESP_LOGE(TAG, "Failed to initialize default configuration");
+        return false;
+    }
+    
+    // Try loading from multiple sources in order of preference
+    const char* config_paths[] = {
+        "/sdcard/cfg.jsn",           // Primary SD card config
+        "/sdcard/mcp_config.json",   // Alternative SD card config  
+        "/spiffs/cfg.jsn"            // Embedded config fallback
+    };
+    
+    bool config_loaded = false;
+    for (int i = 0; i < 3; i++) {
+        if (mcp_config_load_from_file(config, config_paths[i])) {
+            ESP_LOGI(TAG, "Successfully loaded config from: %s", config_paths[i]);
+            config_loaded = true;
+            break;
+        } else {
+            ESP_LOGD(TAG, "Config file not found or failed to load: %s", config_paths[i]);
+        }
+    }
+    
+    // If no config file was loaded and we have default route/file, add it
+    if (!config_loaded && default_route && default_wasm_file) {
+        ESP_LOGI(TAG, "No config file found, using provided defaults");
+        
+        if (config->route_count < MAX_MCP_ROUTES) {
+            // Add the default route
+            strncpy(config->routes[config->route_count].route, default_route, MAX_ROUTE_LENGTH - 1);
+            config->routes[config->route_count].route[MAX_ROUTE_LENGTH - 1] = '\0';
+            
+            strncpy(config->routes[config->route_count].wasm_file, default_wasm_file, MAX_FILENAME_LENGTH - 1);
+            config->routes[config->route_count].wasm_file[MAX_FILENAME_LENGTH - 1] = '\0';
+            
+            config->route_count++;
+            
+            ESP_LOGI(TAG, "Added default route: %s -> %s", default_route, default_wasm_file);
+        } else {
+            ESP_LOGW(TAG, "Cannot add default route - route table full");
+        }
+    }
+    
+    // Final validation and logging
+    ESP_LOGI(TAG, "MCP configuration initialized successfully:");
+    ESP_LOGI(TAG, "  Configuration source: %s", config_loaded ? "file" : "defaults");
+    ESP_LOGI(TAG, "  Routes configured: %d", config->route_count);
+    ESP_LOGI(TAG, "  Protected pins: %d", config->gpio_protection.protected_pin_count);
+    ESP_LOGI(TAG, "  WASM heap size: %d bytes", config->system.wasm_heap_size);
+    ESP_LOGI(TAG, "  WASM stack size: %d bytes", config->system.wasm_stack_size);
+    
+    return true;
+}

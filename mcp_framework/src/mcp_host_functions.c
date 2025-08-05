@@ -181,6 +181,16 @@ int32_t mcp_native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src,
     return wasm_addr;
 }
 
+int32_t mcp_native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n) {
+    // Using automatic pointer conversion (**i) - no validation needed
+    return memcmp(s1, s2, n);
+}
+
+int32_t mcp_native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, unsigned long n) {
+    // Using automatic string conversion ($$) - no validation needed
+    return strncmp(s1, s2, n);
+}
+
 // ========== Logging Functions ==========
 
 int32_t mcp_native_log_info(wasm_exec_env_t exec_env, const char* tag, const char* message) {
@@ -455,6 +465,8 @@ NativeSymbol mcp_core_host_functions[] = {
     
     // Memory functions
     {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
+    {"memcmp", mcp_native_memcmp, "(**i)i", NULL},
+    {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
     
     // Logging functions
     {"log_info", mcp_native_log_info, "($$)i", NULL},

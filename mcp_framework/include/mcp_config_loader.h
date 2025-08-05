@@ -81,6 +81,23 @@ bool mcp_config_init_defaults(mcp_config_t* config);
  */
 bool mcp_config_load_from_json(mcp_config_t* config, const char* json_string);
 
+/**
+ * @brief Initialize MCP configuration with smart fallback loading
+ * 
+ * This function tries multiple sources in order:
+ * 1. SD card config files (/sdcard/cfg.jsn, /sdcard/mcp_config.json)
+ * 2. Embedded config files (/spiffs/cfg.jsn)
+ * 3. Default configuration with fallback route
+ * 
+ * @param config Pointer to configuration structure to populate
+ * @param default_route Default route to use if no config found (can be NULL)
+ * @param default_wasm_file Default WASM file for the route (can be NULL)
+ * @return true if configuration was initialized successfully
+ */
+bool mcp_config_init_with_fallback(mcp_config_t* config, 
+                                   const char* default_route, 
+                                   const char* default_wasm_file);
+
 #ifdef __cplusplus
 }
 #endif
