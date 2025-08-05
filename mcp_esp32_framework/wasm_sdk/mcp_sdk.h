@@ -1,0 +1,112 @@
+#ifndef MCP_SDK_H
+#define MCP_SDK_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// MCP SDK for ESP32 WASM Modules
+// This header provides the interface for implementing MCP servers in WebAssembly
+
+// Maximum buffer sizes
+#define MCP_MAX_TOOL_NAME 64
+#define MCP_MAX_DESCRIPTION 256
+#define MCP_MAX_PARAMS 512
+#define MCP_MAX_RESPONSE 1024
+
+// MCP Result structure
+typedef struct {
+    int32_t code;      // 0 = success, negative = error
+    char message[256]; // Error message or success description
+    char data[512];    // JSON data payload
+} mcp_result_t;
+
+// MCP Tool handler function signature
+typedef mcp_result_t (*mcp_tool_handler_t)(const char* params);
+
+// MCP Tool definition
+typedef struct {
+    char name[MCP_MAX_TOOL_NAME];
+    char description[MCP_MAX_DESCRIPTION];
+    mcp_tool_handler_t handler;
+} mcp_tool_t;
+
+// === Host Function Imports ===
+// These functions are provided by the ESP32 host
+
+// GPIO Control
+extern int32_t gpio_set_level(int32_t pin, int32_t level);
+extern int32_t gpio_get_level(int32_t pin);
+extern int32_t gpio_set_direction(int32_t pin, int32_t direction);
+extern int32_t gpio_is_pin_protected(int32_t pin);
+
+// SSE Events
+extern int32_t sse_send_event(const char* event_type, const char* data);
+extern int32_t sse_send_tool_result(const char* tool_name, const char* result);
+
+// System Info
+extern int32_t get_tick_count(void);
+extern int32_t get_free_heap(void);
+extern int32_t get_uptime_ms(void);
+
+// JSON Helper Functions
+extern int32_t json_parse_request(const char* json, char* method, char* params, int32_t max_len);
+extern int32_t json_create_response(const char* result, char* response, int32_t max_len);
+extern int32_t json_create_error(int32_t code, const char* message, char* response, int32_t max_len);
+
+// Logging
+extern int32_t log_info(const char* tag, const char* message);
+extern int32_t log_info2(uint32_t str_offset);
+extern int32_t log_info3(char *str, uint32_t len);
+extern int32_t log_error(const char* tag, const char* message);
+
+// === MCP SDK Functions ===
+// These functions are provided by the SDK
+
+// Server initialization
+int32_t mcp_server_init(const char* server_name, const char* version);
+
+// MCP protocol state
+typedef enum {
+    MCP_STATE_UNINITIALIZED = 0,
+    MCP_STATE_INITIALIZING = 1,
+    MCP_STATE_INITIALIZED = 2
+} mcp_state_t;
+
+// Tool registration
+int32_t mcp_register_tool(const mcp_tool_t* tool);
+
+// Main MCP request handler (called by ESP32)
+int32_t mcp_handle_request(const char* json_request, char* response, int32_t max_len);
+
+// Helper functions for creating results
+mcp_result_t mcp_success(const char* data);
+mcp_result_t mcp_error(int32_t code, const char* message);
+
+// JSON parsing helpers for tool parameters
+int32_t mcp_parse_int_param(const char* params, const char* key, int32_t* value);
+int32_t mcp_parse_string_param(const char* params, const char* key, char* value, int32_t max_len);
+int32_t mcp_parse_bool_param(const char* params, const char* key, bool* value);
+
+// JSON creation helpers for tool results
+int32_t mcp_create_json_int(const char* key, int32_t value, char* json, int32_t max_len);
+int32_t mcp_create_json_string(const char* key, const char* value, char* json, int32_t max_len);
+int32_t mcp_create_json_bool(const char* key, bool value, char* json, int32_t max_len);
+
+// GPIO Constants (matching ESP-IDF)
+#define GPIO_MODE_INPUT    0
+#define GPIO_MODE_OUTPUT   1
+#define GPIO_MODE_OUTPUT_OD 2
+#define GPIO_MODE_INPUT_OUTPUT 3
+#define GPIO_MODE_INPUT_OUTPUT_OD 4
+
+// === Required Exports ===
+// WASM modules must implement these functions:
+
+// Called by ESP32 to handle MCP JSON-RPC requests
+// Returns 0 on success, negative on error
+extern int32_t handle_mcp_request(const char* request, char* response, int32_t max_len);
+
+// Optional: Module initialization (called once when loaded)
+extern void _start(void);
+
+#endif // MCP_SDK_H

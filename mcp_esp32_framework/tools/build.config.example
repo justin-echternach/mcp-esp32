@@ -1,0 +1,19 @@
+# Example configuration for build_wasm.sh
+# Copy this to build.config and customize for your environment
+
+# Path to WASI SDK installation
+# Can also be set as environment variable WASI_SDK_PATH
+WASI_SDK_PATH=/opt/wasi-sdk-20.0
+
+# Default output directory for WASM files
+OUTPUT_DIR=wasm
+
+# Default MCP SDK path (relative to where build script is run)
+SDK_PATH=wasm_sdk
+
+# Default memory settings
+STACK_SIZE=65536        # 64KB stack
+INITIAL_MEMORY=131072   # 128KB total memory
+
+# Additional exports (space-separated)
+# EXTRA_EXPORTS="my_init_function my_cleanup_function"
