@@ -114,6 +114,71 @@ esp_err_t mcp_http_health_handler(httpd_req_t *req);
  */
 esp_err_t mcp_http_set_cors_headers(httpd_req_t *req);
 
+// ========== Server-Sent Events (SSE) Support ==========
+
+/**
+ * @brief SSE event data structure
+ */
+typedef struct {
+    const char* event;          ///< Event type (optional, can be NULL)
+    const char* data;           ///< Event data
+    const char* id;             ///< Event ID (optional, can be NULL)
+    int retry;                  ///< Retry interval in milliseconds (0 = no retry field)
+} mcp_sse_event_t;
+
+/**
+ * @brief SSE connection context (opaque structure)
+ */
+typedef struct mcp_sse_connection mcp_sse_connection_t;
+
+/**
+ * @brief Initialize SSE headers for a connection
+ * 
+ * This function sets the required SSE headers and sends the initial connection event.
+ * 
+ * @param req HTTP request (will be used for streaming)
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t mcp_sse_init_connection(httpd_req_t *req);
+
+/**
+ * @brief Send SSE event to client
+ * 
+ * @param req HTTP request handle
+ * @param event SSE event data
+ * @return esp_err_t ESP_OK on success, ESP_FAIL if client disconnected
+ */
+esp_err_t mcp_sse_send_event(httpd_req_t *req, const mcp_sse_event_t* event);
+
+/**
+ * @brief Send simple SSE event with just event type and data
+ * 
+ * @param req HTTP request handle
+ * @param event_type Event type (can be NULL)
+ * @param data Event data
+ * @return esp_err_t ESP_OK on success, ESP_FAIL if client disconnected
+ */
+esp_err_t mcp_sse_send_simple(httpd_req_t *req, const char* event_type, const char* data);
+
+/**
+ * @brief Finalize SSE connection (close stream)
+ * 
+ * @param req HTTP request handle
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t mcp_sse_close_connection(httpd_req_t *req);
+
+/**
+ * @brief Built-in SSE demo handler
+ * 
+ * This demonstrates how to implement SSE endpoints. Applications can use this
+ * as a template or extend it for their specific needs.
+ * 
+ * @param req HTTP request
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t mcp_http_sse_demo_handler(httpd_req_t *req);
+
 #ifdef __cplusplus
 }
 #endif

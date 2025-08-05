@@ -1,5 +1,5 @@
-#ifndef MCP_PTHREAD_HANDLER_H
-#define MCP_PTHREAD_HANDLER_H
+#ifndef MCP_PTHREAD_POOL_H
+#define MCP_PTHREAD_POOL_H
 
 #include <esp_http_server.h>
 #include <pthread.h>
@@ -98,4 +98,4 @@ const char* find_wasm_for_route(const char* route);
 }
 #endif
 
-#endif // MCP_PTHREAD_HANDLER_H
+#endif // MCP_PTHREAD_POOL_H

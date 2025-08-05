@@ -2,6 +2,7 @@
 #define MCP_WASM_RUNTIME_H
 
 #include "wasm_export.h"
+#include "mcp_pthread_pool.h"  // For mcp_wasm_module_t definition
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -74,6 +75,23 @@ bool mcp_wasm_safe_call(wasm_exec_env_t exec_env, wasm_function_inst_t func,
 
 // Debug: Dump WASM module exports for inspection
 void mcp_wasm_dump_exports(wasm_module_t module, const char* module_name);
+
+// ========== MCP Module Registry ==========
+
+// Initialize MCP module registry
+bool mcp_wasm_registry_init(void);
+
+// Load MCP WASM module for a specific route
+mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char* wasm_filename);
+
+// Find WASM filename for a given route
+const char* mcp_wasm_find_file_for_route(const char* route);
+
+// Get module registry statistics
+void mcp_wasm_registry_stats(int* loaded_count, int* max_count);
+
+// Cleanup MCP module registry
+void mcp_wasm_registry_cleanup(void);
 
 #ifdef __cplusplus
 }

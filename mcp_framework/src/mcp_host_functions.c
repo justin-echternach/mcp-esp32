@@ -1,4 +1,5 @@
 #include "mcp_host_functions.h"
+#include "mcp_config_loader.h"
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -335,6 +336,108 @@ static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char*
     return 0;
 }
 
+// ========== JSON-RPC Protocol Functions (MCP Framework) ==========
+
+static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str, 
+                                         char* method_out, char* params_out, int32_t max_len)
+{
+    ESP_LOGD(TAG, "JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json_str, method_out, params_out, max_len);
+    
+    // Since we're using automatic conversion ($**i), the pointers are already native pointers
+    // No validation needed - just direct access
+    
+    ESP_LOGD(TAG, "JSON_PARSE: All validations passed, JSON content: '%.50s'", json_str);
+    
+    // Parse JSON-RPC method
+    ESP_LOGD(TAG, "JSON_PARSE: About to call json_find_string");
+    if (!mcp_json_find_string(json_str, "method", method_out, 64)) {  // method buffer is 64 bytes
+        ESP_LOGE(TAG, "JSON_PARSE: json_find_string failed - method not found");
+        return -2; // Method not found
+    }
+    
+    ESP_LOGD(TAG, "JSON_PARSE: Successfully parsed method: '%s'", method_out);
+    
+    // Parse JSON-RPC params (extract the params object as string)
+    const char* params_start = strstr(json_str, "\"params\"");
+    if (params_start) {
+        params_start = strchr(params_start, ':');
+        if (params_start) {
+            params_start++; // Skip ':'
+            while (*params_start == ' ' || *params_start == '\t') params_start++; // Skip whitespace
+            
+            // Copy the params value
+            int i = 0;
+            int brace_depth = 0;
+            bool in_string = false;
+            bool escape_next = false;
+            
+            while (params_start[i] && i < max_len - 1) {
+                char c = params_start[i];
+                
+                if (escape_next) {
+                    escape_next = false;
+                } else if (c == '\\') {
+                    escape_next = true;
+                } else if (c == '"' && !escape_next) {
+                    in_string = !in_string;
+                } else if (!in_string) {
+                    if (c == '{') brace_depth++;
+                    else if (c == '}') brace_depth--;
+                    else if ((c == ',' || c == '}') && brace_depth == 0) break;
+                }
+                
+                params_out[i] = c;
+                i++;
+                
+                if (!in_string && brace_depth == 0 && (c == ']' || c == '"' || (c >= '0' && c <= '9'))) {
+                    // End of simple value
+                    i++;
+                    break;
+                }
+            }
+            params_out[i] = '\0';
+        } else {
+            strcpy(params_out, "null");
+        }
+    } else {
+        strcpy(params_out, "null");
+    }
+    
+    return 0;
+}
+
+static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
+{
+    // Using buffer + length signature ($*~) - safer parameter handling
+    if (!response || max_len <= 0) {
+        printf("ERROR: Invalid response buffer parameters\\n");
+        return -1;
+    }
+    
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":1}",
+        result);
+    
+    printf("JSON_CREATE_RESPONSE: Created response (%d bytes): %.100s...\\n", len, response);
+    return len < max_len ? 0 : -2; // Buffer overflow
+}
+
+static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
+{
+    // Using buffer + length signature (i$*~) - safer parameter handling
+    if (!response || max_len <= 0) {
+        printf("ERROR: Invalid response buffer parameters\\n");
+        return -1;
+    }
+    
+    int len = snprintf(response, max_len,
+        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%ld,\"message\":\"%s\"},\"id\":1}",
+        (long)code, message);
+    
+    printf("JSON_CREATE_ERROR: Created error response (%d bytes): %.100s...\\n", len, response);
+    return len < max_len ? 0 : -2; // Buffer overflow
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -371,6 +474,11 @@ NativeSymbol mcp_core_host_functions[] = {
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},
     {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
+    
+    // JSON-RPC Protocol (MCP Framework)
+    {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
+    {"json_create_response", native_json_create_response, "($*~)i", NULL},
+    {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);

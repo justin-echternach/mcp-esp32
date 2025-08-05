@@ -12,8 +12,9 @@
 #include <errno.h>
 #include <string.h>
 
-// MCP pthread handler
-#include "mcp_pthread_handler.h"
+// MCP framework includes
+#include "../mcp_framework/include/mcp_pthread_pool.h"
+#include "../mcp_framework/include/mcp_wasm_runtime.h"
 
 // WAMR includes
 #include "wasm_export.h"
@@ -26,7 +27,7 @@
 #include "../mcp_framework/include/mcp_http_server.h"
 #include "../mcp_framework/include/mcp_wifi_minimal.h"
 #include "../mcp_framework/include/mcp_wasm_runtime.h"
-// Note: mcp_types.h not needed yet - types defined in mcp_pthread_handler.h
+// Note: mcp_types.h not needed yet - types defined in mcp_pthread_pool.h
 
 // SD Card includes
 #include "esp_vfs_fat.h"
@@ -191,11 +192,12 @@ static bool is_gpio_pin_input_only(int pin) {
 
 // ========== HTTP Server & SSE Functions ==========
 
-// Send SSE event (currently disabled - using direct streaming approach)
+// Send SSE event using MCP framework
 static void send_sse_event(const char *event, const char *data) {
-    // This function is temporarily disabled while we use the direct streaming approach
-    ESP_LOGD(TAG, "SSE event would be sent: %s = %s", event, data);
-    // TODO: Implement shared state mechanism for real-time LED events
+    // This function would need a global SSE connection reference
+    // For now, just log - the framework SSE functions are available for real implementations
+    ESP_LOGD(TAG, "SSE event (framework available): %s = %s", event, data);
+    // TODO: Implement using mcp_sse_send_simple() with stored connection
 }
 
 // Root handler - simple status page
@@ -293,318 +295,12 @@ static esp_err_t sse_handler(httpd_req_t *req) {
 }
 
 // API endpoint to toggle LED via WASM
-// MCP WASM Module Management - struct defined in mcp_pthread_handler.h
+// MCP WASM Module Management moved to mcp_wasm_runtime framework
 
-static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
-static int g_mcp_module_count = 0;
-static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Load WASM module for MCP route (moved to framework)
+// Function moved to mcp_wasm_runtime framework as mcp_wasm_load_module_for_route()
 
-
-// Load WASM module for MCP route
-mcp_wasm_module_t* load_mcp_wasm_module(const char* route, const char* wasm_filename) {
-    pthread_mutex_lock(&g_mcp_modules_mutex);
-    
-    // Check if already loaded
-    for (int i = 0; i < g_mcp_module_count; i++) {
-        if (strcmp(g_mcp_modules[i].route, route) == 0 && g_mcp_modules[i].loaded) {
-            pthread_mutex_unlock(&g_mcp_modules_mutex);
-            return &g_mcp_modules[i];
-        }
-    }
-    
-    // Find empty slot
-    if (g_mcp_module_count >= 8) {
-        ESP_LOGE(TAG, "Maximum number of MCP modules reached");
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    mcp_wasm_module_t* module = &g_mcp_modules[g_mcp_module_count];
-    strncpy(module->route, route, sizeof(module->route) - 1);
-    strncpy(module->wasm_file, wasm_filename, sizeof(module->wasm_file) - 1);
-    module->loaded = false;
-    
-    // Load WASM file
-    char wasm_path[128];
-    snprintf(wasm_path, sizeof(wasm_path), "/sdcard/wasm/%s", wasm_filename);
-    
-    FILE *file = fopen(wasm_path, "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open WASM file: %s", wasm_path);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    // Memory debugging before allocation
-    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
-#ifdef CONFIG_SPIRAM
-    size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t psram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-    ESP_LOGI(TAG, "Memory before WASM allocation: DRAM free=%zu, largest=%zu | PSRAM free=%zu, largest=%zu | need=%ld bytes", 
-             free_heap, largest_block, psram_free, psram_largest, file_size);
-#else
-    ESP_LOGI(TAG, "Memory before WASM allocation: free=%zu bytes, largest_block=%zu bytes, need=%ld bytes", 
-             free_heap, largest_block, file_size);
-#endif
-    
-    // Allocate buffer - use smaller heap size to save memory
-    uint8_t *wasm_file_buf = malloc(file_size);
-    if (!wasm_file_buf) {
-        ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
-#ifdef CONFIG_SPIRAM
-        ESP_LOGE(TAG, "Memory after failed allocation: DRAM free=%zu, largest=%zu | PSRAM free=%zu, largest=%zu", 
-                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-                 heap_caps_get_free_size(MALLOC_CAP_SPIRAM), heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM));
-#else
-        ESP_LOGE(TAG, "Memory after failed allocation: free=%zu bytes, largest_block=%zu bytes", 
-                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-#endif
-        fclose(file);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    // Read file
-    size_t bytes_read = fread(wasm_file_buf, 1, file_size, file);
-    fclose(file);
-    
-    if (bytes_read != file_size) {
-        ESP_LOGE(TAG, "Failed to read WASM file completely");
-        free(wasm_file_buf);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    // DEBUGGING: Check WAMR compilation mode
-    ESP_LOGI(TAG, "🔍 WAMR Compilation Mode Check:");
-#ifdef WASM_ENABLE_INTERP
-    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_INTERP defined - Interpreter mode enabled");
-#else
-    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_INTERP not defined");
-#endif
-#ifdef WASM_ENABLE_FAST_INTERP
-    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_FAST_INTERP defined - Fast interpreter enabled");
-#else
-    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_FAST_INTERP not defined");
-#endif
-#ifdef WASM_ENABLE_AOT
-    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_AOT defined - AOT mode enabled");
-#else
-    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_AOT not defined");
-#endif
-#ifdef WASM_ENABLE_JIT
-    ESP_LOGI(TAG, "  ✅ WASM_ENABLE_JIT defined - JIT mode enabled");
-#else
-    ESP_LOGI(TAG, "  ❌ WASM_ENABLE_JIT not defined");
-#endif
-    
-    // DEBUGGING: Inspect WASM file buffer for target string BEFORE wasm_runtime_load
-    const char* target_string = "mcp_handle_request:About to check tools/list";
-    size_t target_len = strlen(target_string);
-    bool found_before = false;
-    size_t found_offset_before = 0;
-    
-    ESP_LOGI(TAG, "🔍 BEFORE wasm_runtime_load - Searching for string: '%s'", target_string);
-    ESP_LOGI(TAG, "🔍 File size: %ld bytes, searching for %zu byte string", file_size, target_len);
-    
-    for (size_t i = 0; i <= file_size - target_len; i++) {
-        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-            found_before = true;
-            found_offset_before = i;
-            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer BEFORE load", i, i);
-            
-            // Show surrounding bytes
-            ESP_LOGI(TAG, "🔍 Surrounding bytes at offset 0x%zx:", i);
-            size_t start = (i >= 16) ? i - 16 : 0;
-            size_t end = (i + target_len + 16 < file_size) ? i + target_len + 16 : file_size;
-            
-            for (size_t j = start; j < end; j++) {
-                if (j == i) ESP_LOGI(TAG, "🔍   [TARGET START] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-                else if (j == i + target_len) ESP_LOGI(TAG, "🔍   [TARGET END] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-                else ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-            }
-            break;
-        }
-    }
-    
-    if (!found_before) {
-        ESP_LOGW(TAG, "🔍 String NOT found in file buffer before load");
-    }
-    
-    // Load WASM module
-    char error_buf[128];
-    ESP_LOGI(TAG, "🔍 Calling wasm_runtime_load...");
-    module->wasm_module = wasm_runtime_load(wasm_file_buf, file_size, error_buf, sizeof(error_buf));
-    ESP_LOGI(TAG, "🔍 wasm_runtime_load returned: %p", module->wasm_module);
-    
-    // DEBUGGING: Inspect WASM file buffer for target string AFTER wasm_runtime_load
-    ESP_LOGI(TAG, "🔍 AFTER wasm_runtime_load - Searching for string: '%s'", target_string);
-    bool found_after = false;
-    size_t found_offset_after = 0;
-    
-    for (size_t i = 0; i <= file_size - target_len; i++) {
-        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-            found_after = true;
-            found_offset_after = i;
-            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer AFTER load", i, i);
-            break;
-        }
-    }
-    
-    if (!found_after && found_before) {
-        ESP_LOGI(TAG, "🚨 STRING DISAPPEARED from file buffer after wasm_runtime_load!");
-        ESP_LOGI(TAG, "🚨 This confirms the issue: wasm_runtime_load modified the file buffer");
-        
-        // Check what's at the original location now
-        ESP_LOGI(TAG, "🔍 Checking what's at original offset 0x%zx now:", found_offset_before);
-        for (size_t j = found_offset_before; j < found_offset_before + target_len && j < file_size; j++) {
-            ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-        }
-    } else if (found_after && found_before && found_offset_after == found_offset_before) {
-        ESP_LOGI(TAG, "✅ String still present at same location after wasm_runtime_load");
-    } else if (found_after && found_before && found_offset_after != found_offset_before) {
-        ESP_LOGI(TAG, "🔄 String moved from 0x%zx to 0x%zx after wasm_runtime_load", found_offset_before, found_offset_after);
-    } else if (!found_before && !found_after) {
-        ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
-    }
-    
-    free(wasm_file_buf);
-    
-    if (!module->wasm_module) {
-        ESP_LOGE(TAG, "Failed to load WASM module %s: %s", wasm_filename, error_buf);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    // Unload LED WASM to free memory for MCP WASM
-    if (g_wasm_module_inst && g_exec_env) {
-        ESP_LOGI(TAG, "Unloading LED WASM to free memory for MCP WASM");
-        size_t free_before_unload = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        
-        wasm_runtime_destroy_exec_env(g_exec_env);
-        wasm_runtime_deinstantiate(g_wasm_module_inst);
-        wasm_runtime_unload(g_wasm_module);
-        g_exec_env = NULL;
-        g_wasm_module_inst = NULL;
-        g_wasm_module = NULL;
-        g_wasm_available = false;
-        
-        size_t free_after_unload = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-        ESP_LOGI(TAG, "LED WASM unloaded: freed %zu bytes", free_after_unload - free_before_unload);
-    }
-    
-    // Memory debugging before instantiation
-    ESP_LOGI(TAG, "Memory before WASM instantiation: free=%zu bytes, largest_block=%zu bytes", 
-             heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    
-    // Instantiate WASM module with adequate memory for MCP operations
-    uint32_t stack_size = 64 * 1024;  // Increased to 64KB to fix auxiliary stack overflow
-    uint32_t heap_size = 128 * 1024;   // Increased from 4KB to 16KB for string operations and buffers
-    module->wasm_module_inst = wasm_runtime_instantiate(module->wasm_module, stack_size, heap_size, error_buf, sizeof(error_buf));
-    
-    if (!module->wasm_module_inst) {
-        ESP_LOGE(TAG, "Failed to instantiate WASM module %s: %s", wasm_filename, error_buf);
-        ESP_LOGE(TAG, "Memory after failed instantiation: free=%zu bytes, largest_block=%zu bytes", 
-                 heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-        wasm_runtime_unload(module->wasm_module);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    // Create execution environment
-    module->exec_env = wasm_runtime_create_exec_env(module->wasm_module_inst, stack_size);
-    if (!module->exec_env) {
-        ESP_LOGE(TAG, "Failed to create execution environment for %s", wasm_filename);
-        wasm_runtime_deinstantiate(module->wasm_module_inst);
-        wasm_runtime_unload(module->wasm_module);
-        pthread_mutex_unlock(&g_mcp_modules_mutex);
-        return NULL;
-    }
-    
-    module->loaded = true;
-    g_mcp_module_count++;
-    
-    ESP_LOGI(TAG, "Successfully loaded MCP WASM module: %s -> %s", route, wasm_filename);
-    ESP_LOGI(TAG, "Memory after successful MCP module load: free=%zu bytes, largest_block=%zu bytes", 
-             heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    
-    // CRITICAL: Call _start() function to initialize the module and register tools
-    ESP_LOGI(TAG, "🔍 DEBUG: Looking for _start function to initialize module");
-    wasm_function_inst_t start_func = wasm_runtime_lookup_function(module->wasm_module_inst, "_start");
-    if (start_func) {
-        ESP_LOGI(TAG, "🔍 DEBUG: Found _start function, calling to register tools");
-        uint32_t argv[1] = {0}; // _start takes no parameters
-        bool start_success = wasm_runtime_call_wasm(module->exec_env, start_func, 0, argv);
-        if (start_success) {
-            ESP_LOGI(TAG, "✅ _start function called successfully - tools should be registered");
-        } else {
-            ESP_LOGW(TAG, "⚠️ _start function call failed - tools may not be registered");
-            const char* exception = wasm_runtime_get_exception(module->wasm_module_inst);
-            if (exception) {
-                ESP_LOGW(TAG, "⚠️ _start exception: %s", exception);
-            }
-        }
-    } else {
-        ESP_LOGW(TAG, "⚠️ No _start function found - tools will not be registered automatically");
-    }
-    
-    // Debug: Dump all WASM exports to diagnose function lookup issues
-    mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
-    
-    ESP_LOGI(TAG, "🔍 DEBUG: About to unlock mutex and test function lookup");
-    ESP_LOGI(TAG, "🔍 DEBUG: g_mcp_module_count = %d", g_mcp_module_count);
-    
-    // Unlock mutex before function lookup test
-    pthread_mutex_unlock(&g_mcp_modules_mutex);
-    
-    // Debug: test if the function lookup works here
-    // Look for MCP request handler function
-    ESP_LOGI(TAG, "🔍 DEBUG: Before lookup - module ptr: %p, wasm_module: %p, wasm_module_inst: %p", 
-             module, module->wasm_module, module->wasm_module_inst);
-    
-    wasm_function_inst_t handle_request_func = wasm_runtime_lookup_function(module->wasm_module_inst, "handle_mcp_request");
-    if (!handle_request_func) {
-        ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function in load_mcp_wasm_module", wasm_filename);
-        
-        return NULL;
-    }
-    else {
-        ESP_LOGI(TAG, "WASM module %s has handle_mcp_request function", wasm_filename);
-        ESP_LOGI(TAG, "🔍 DEBUG: Function found at: %p", handle_request_func);
-    }
-    
-    ESP_LOGI(TAG, "🔍 DEBUG: Returning module ptr: %p (array index: %d)", 
-             module, (int)(module - g_mcp_modules));
-    
-    return module;
-}
-
-// Find WASM filename for route
-const char* find_wasm_for_route(const char* route) {
-    // Check exact route match first
-    for (int i = 0; i < MAX_MCP_ROUTES && g_mcp_config.routes[i].route[0] != '\0'; i++) {
-        if (strcmp(g_mcp_config.routes[i].route, route) == 0) {
-            return g_mcp_config.routes[i].wasm_file;
-        }
-    }
-    
-    // Check prefix match (e.g., "/mcp/led" matches "/mcp")
-    for (int i = 0; i < MAX_MCP_ROUTES && g_mcp_config.routes[i].route[0] != '\0'; i++) {
-        int route_len = strlen(g_mcp_config.routes[i].route);
-        if (strncmp(g_mcp_config.routes[i].route, route, route_len) == 0 &&
-            (route[route_len] == '/' || route[route_len] == '\0')) {
-            return g_mcp_config.routes[i].wasm_file;
-        }
-    }
-    
-    return NULL;
-}
+// Function moved to mcp_wasm_runtime framework as mcp_wasm_find_file_for_route()
 
 
 
@@ -763,105 +459,6 @@ static int32_t native_get_tick(wasm_exec_env_t exec_env)
 // System Info Functions
 // System info functions moved to mcp_framework/src/mcp_host_functions.c
 
-// JSON Helper Functions
-static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json, char* method, char* params, int32_t max_len)
-{
-    ESP_LOGI(TAG, "🔍 JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json, method, params, max_len);
-    
-    // Since we're using automatic conversion ($**i), the pointers are already native pointers
-    // No validation needed - just direct access
-    
-    ESP_LOGI(TAG, "🔍 JSON_PARSE: All validations passed, JSON content: '%.50s'", json);
-    
-    // Parse JSON-RPC method
-    ESP_LOGI(TAG, "🔍 JSON_PARSE: About to call json_find_string");
-    if (!mcp_json_find_string(json, "method", method, 64)) {  // method buffer is 64 bytes
-        ESP_LOGE(TAG, "🔍 JSON_PARSE: json_find_string failed - method not found");
-        return -2; // Method not found
-    }
-    
-    ESP_LOGI(TAG, "🔍 JSON_PARSE: Successfully parsed method: '%s'", method);
-    
-    // Parse JSON-RPC params (extract the params object as string)
-    const char* params_start = strstr(json, "\"params\"");
-    if (params_start) {
-        params_start = strchr(params_start, ':');
-        if (params_start) {
-            params_start++; // Skip ':'
-            while (*params_start == ' ' || *params_start == '\t') params_start++; // Skip whitespace
-            
-            // Copy the params value
-            int i = 0;
-            int brace_depth = 0;
-            bool in_string = false;
-            bool escape_next = false;
-            
-            while (params_start[i] && i < max_len - 1) {
-                char c = params_start[i];
-                
-                if (escape_next) {
-                    escape_next = false;
-                } else if (c == '\\') {
-                    escape_next = true;
-                } else if (c == '"' && !escape_next) {
-                    in_string = !in_string;
-                } else if (!in_string) {
-                    if (c == '{') brace_depth++;
-                    else if (c == '}') brace_depth--;
-                    else if ((c == ',' || c == '}') && brace_depth == 0) break;
-                }
-                
-                params[i] = c;
-                i++;
-                
-                if (!in_string && brace_depth == 0 && (c == ']' || c == '"' || (c >= '0' && c <= '9'))) {
-                    // End of simple value
-                    i++;
-                    break;
-                }
-            }
-            params[i] = '\0';
-        } else {
-            strcpy(params, "null");
-        }
-    } else {
-        strcpy(params, "null");
-    }
-    
-    return 0;
-}
-
-static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
-{
-    // Using buffer + length signature ($*~) - safer parameter handling
-    if (!response || max_len <= 0) {
-        printf("ERROR: Invalid response buffer parameters\n");
-        return -1;
-    }
-    
-    int len = snprintf(response, max_len,
-        "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":1}",
-        result);
-    
-    printf("JSON_CREATE_RESPONSE: Created response (%d bytes): %.100s...\n", len, response);
-    return len < max_len ? 0 : -2; // Buffer overflow
-}
-
-static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
-{
-    // Using buffer + length signature (i$*~) - safer parameter handling
-    if (!response || max_len <= 0) {
-        printf("ERROR: Invalid response buffer parameters\n");
-        return -1;
-    }
-    
-    int len = snprintf(response, max_len,
-        "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%ld,\"message\":\"%s\"},\"id\":1}",
-        (long)code, message);
-    
-    printf("JSON_CREATE_ERROR: Created error response (%d bytes): %.100s...\n", len, response);
-    return len < max_len ? 0 : -2; // Buffer overflow
-}
 
 // Logging Functions
 
@@ -934,10 +531,6 @@ static NativeSymbol app_native_symbols[] = {
     {"led_control", native_led_control, "(i)i", NULL},
     {"get_tick", native_get_tick, "()i", NULL},
     
-    // MCP JSON Helper Functions (application-specific)
-    {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
-    {"json_create_response", native_json_create_response, "($*~)i", NULL},
-    {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
     
     // Debug logging functions (temporary)
     {"log_info2", native_log_info2, "(i)i", NULL},
@@ -1261,6 +854,13 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    
+    // Initialize MCP module registry
+    ESP_LOGI(TAG, "Initializing MCP module registry...");
+    if (!mcp_wasm_registry_init()) {
+        ESP_LOGE(TAG, "Failed to initialize MCP module registry");
+        return;
+    }
     
     // Initialize WiFi
     ESP_LOGI(TAG, "Initializing WiFi...");

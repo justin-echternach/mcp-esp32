@@ -2,6 +2,8 @@
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "mcp_http_server";
 
@@ -224,6 +226,168 @@ esp_err_t mcp_http_set_cors_headers(httpd_req_t *req) {
         ESP_LOGE(TAG, "Failed to set CORS headers header");
         return ret;
     }
+    
+    return ESP_OK;
+}
+
+// ========== Server-Sent Events (SSE) Implementation ==========
+
+esp_err_t mcp_sse_init_connection(httpd_req_t *req) {
+    ESP_LOGI(TAG, "Initializing SSE connection");
+    
+    // Set SSE headers
+    esp_err_t ret = httpd_resp_set_type(req, "text/event-stream");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set SSE content type");
+        return ret;
+    }
+    
+    ret = httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set SSE cache control header");
+        return ret;
+    }
+    
+    ret = httpd_resp_set_hdr(req, "Connection", "keep-alive");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set SSE connection header");
+        return ret;
+    }
+    
+    // Set CORS headers for SSE
+    ret = mcp_http_set_cors_headers(req);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set CORS headers for SSE");
+        return ret;
+    }
+    
+    // Send initial connected event
+    const char *welcome = "event: connected\ndata: SSE connection established\n\n";
+    ret = httpd_resp_send_chunk(req, welcome, strlen(welcome));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send SSE welcome event");
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "SSE connection initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t mcp_sse_send_event(httpd_req_t *req, const mcp_sse_event_t* event) {
+    if (!req || !event) {
+        ESP_LOGE(TAG, "Invalid parameters for SSE event");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (!event->data) {
+        ESP_LOGE(TAG, "SSE event data is required");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Build SSE event string
+    char sse_buffer[1024];
+    int offset = 0;
+    
+    // Add event type if provided
+    if (event->event) {
+        offset += snprintf(sse_buffer + offset, sizeof(sse_buffer) - offset,
+                          "event: %s\n", event->event);
+    }
+    
+    // Add event ID if provided
+    if (event->id) {
+        offset += snprintf(sse_buffer + offset, sizeof(sse_buffer) - offset,
+                          "id: %s\n", event->id);
+    }
+    
+    // Add retry if specified
+    if (event->retry > 0) {
+        offset += snprintf(sse_buffer + offset, sizeof(sse_buffer) - offset,
+                          "retry: %d\n", event->retry);
+    }
+    
+    // Add data (required)
+    offset += snprintf(sse_buffer + offset, sizeof(sse_buffer) - offset,
+                      "data: %s\n", event->data);
+    
+    // Add final newline to complete the event
+    offset += snprintf(sse_buffer + offset, sizeof(sse_buffer) - offset, "\n");
+    
+    if (offset >= sizeof(sse_buffer)) {
+        ESP_LOGE(TAG, "SSE event too large for buffer");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    
+    // Send the event
+    esp_err_t ret = httpd_resp_send_chunk(req, sse_buffer, offset);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to send SSE event - client may have disconnected");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGV(TAG, "Sent SSE event: %s", event->event ? event->event : "data");
+    return ESP_OK;
+}
+
+esp_err_t mcp_sse_send_simple(httpd_req_t *req, const char* event_type, const char* data) {
+    mcp_sse_event_t event = {
+        .event = event_type,
+        .data = data,
+        .id = NULL,
+        .retry = 0
+    };
+    
+    return mcp_sse_send_event(req, &event);
+}
+
+esp_err_t mcp_sse_close_connection(httpd_req_t *req) {
+    if (!req) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Send final chunk to close the connection
+    esp_err_t ret = httpd_resp_send_chunk(req, NULL, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to properly close SSE connection");
+    } else {
+        ESP_LOGI(TAG, "SSE connection closed");
+    }
+    
+    return ret;
+}
+
+esp_err_t mcp_http_sse_demo_handler(httpd_req_t *req) {
+    ESP_LOGI(TAG, "SSE demo handler started");
+    
+    // Initialize SSE connection
+    esp_err_t ret = mcp_sse_init_connection(req);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    
+    // Send demo events
+    for (int i = 0; i < 10; i++) {
+        char demo_data[64];
+        snprintf(demo_data, sizeof(demo_data), "Demo message %d", i + 1);
+        
+        ret = mcp_sse_send_simple(req, "demo", demo_data);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Client disconnected during demo");
+            break;
+        }
+        
+        // Wait 1 second between events
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    // Send completion event
+    if (ret == ESP_OK) {
+        ret = mcp_sse_send_simple(req, "complete", "Demo completed");
+    }
+    
+    // Close connection
+    mcp_sse_close_connection(req);
+    ESP_LOGI(TAG, "SSE demo handler finished");
     
     return ESP_OK;
 }

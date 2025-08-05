@@ -1,4 +1,5 @@
-#include "mcp_pthread_handler.h"
+#include "mcp_pthread_pool.h"
+#include "mcp_wasm_runtime.h"
 #include <esp_log.h>
 #include <string.h>
 #include <stdlib.h>
@@ -161,7 +162,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     ESP_LOGI(TAG, "Processing MCP request to %s: %s", req->uri, req->request_body);
     
     // Find WASM module for this route
-    const char* wasm_filename = find_wasm_for_route(req->uri);
+    const char* wasm_filename = mcp_wasm_find_file_for_route(req->uri);
     if (!wasm_filename) {
         ESP_LOGW(TAG, "No WASM module configured for route: %s", req->uri);
         snprintf(req->response, sizeof(req->response),
@@ -174,7 +175,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     ESP_LOGI(TAG, "🔍 DEBUG: Current thread ID: %p", (void*)pthread_self());
     
     // Load WASM module into main thread runtime
-    mcp_wasm_module_t* module = load_mcp_wasm_module(req->uri, wasm_filename);
+    mcp_wasm_module_t* module = mcp_wasm_load_module_for_route(req->uri, wasm_filename);
     if (!module) {
         ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
         snprintf(req->response, sizeof(req->response), 
