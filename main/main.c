@@ -13,20 +13,20 @@
 #include <string.h>
 
 // MCP framework includes
-#include "../mcp_framework/include/mcp_pthread_pool.h"
-#include "../mcp_framework/include/mcp_wasm_runtime.h"
+#include "../mcp_esp32_framework/host/include/mcp_pthread_pool.h"
+#include "../mcp_esp32_framework/host/include/mcp_wasm_runtime.h"
 
 // WAMR includes
 #include "wasm_export.h"
 #include "bh_platform.h"
 
 // MCP Framework includes
-#include "../mcp_framework/include/mcp_config.h"
-#include "../mcp_framework/include/mcp_config_loader.h"
-#include "../mcp_framework/include/mcp_host_functions.h"
-#include "../mcp_framework/include/mcp_http_server.h"
-#include "../mcp_framework/include/mcp_wifi_minimal.h"
-#include "../mcp_framework/include/mcp_wasm_runtime.h"
+#include "../mcp_esp32_framework/host/include/mcp_config.h"
+#include "../mcp_esp32_framework/host/include/mcp_config_loader.h"
+#include "../mcp_esp32_framework/host/include/mcp_host_functions.h"
+#include "../mcp_esp32_framework/host/include/mcp_http_server.h"
+#include "../mcp_esp32_framework/host/include/mcp_wifi_minimal.h"
+#include "../mcp_esp32_framework/host/include/mcp_wasm_runtime.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_pool.h
 
 // SD Card includes
