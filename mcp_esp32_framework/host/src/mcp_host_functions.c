@@ -500,59 +500,6 @@ void mcp_host_clear_request_context(void) {
 
 // ========== HTTP Header Management Functions ==========
 
-// Helper function for case-insensitive string comparison
-static int strcasecmp_custom(const char *s1, const char *s2) {
-    while (*s1 && *s2) {
-        char c1 = tolower((unsigned char)*s1);
-        char c2 = tolower((unsigned char)*s2);
-        if (c1 != c2) return c1 - c2;
-        s1++;
-        s2++;
-    }
-    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
-}
-
-// Helper function to find header in string buffer (case-insensitive)
-static const char* find_header_value(const char* headers, const char* name) {
-    if (!headers || !name) return NULL;
-    
-    size_t name_len = strlen(name);
-    const char* pos = headers;
-    
-    while (*pos) {
-        // Find header name (before colon)
-        const char* colon = strchr(pos, ':');
-        if (!colon) break;
-        
-        // Check if header name matches (case-insensitive)
-        if ((colon - pos) == name_len && strncasecmp(pos, name, name_len) == 0) {
-            // Found header, skip colon and whitespace
-            const char* value = colon + 1;
-            while (*value == ' ' || *value == '\t') value++;
-            
-            // Find end of value (before \r\n)
-            const char* end = strstr(value, "\r\n");
-            if (!end) end = value + strlen(value);
-            
-            // Allocate buffer for value (this will be managed by WAMR)
-            static char value_buffer[512];
-            size_t value_len = end - value;
-            if (value_len >= sizeof(value_buffer)) value_len = sizeof(value_buffer) - 1;
-            
-            strncpy(value_buffer, value, value_len);
-            value_buffer[value_len] = '\0';
-            
-            return value_buffer;
-        }
-        
-        // Move to next line
-        const char* next_line = strstr(pos, "\r\n");
-        if (!next_line) break;
-        pos = next_line + 2;
-    }
-    
-    return NULL;
-}
 
 // Helper function to ensure response headers buffer has enough capacity
 static int ensure_response_headers_capacity(mcp_request_t* request, size_t needed) {
@@ -618,20 +565,60 @@ int32_t mcp_native_set_response_header(wasm_exec_env_t exec_env, const char* nam
     return -3;
 }
 
-const char* mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name) {
+// Get request header value (case-insensitive) - returns length or -1 if not found
+int32_t mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name, char* buffer, int32_t buffer_size) {
     if (!tls_current_request) {
         ESP_LOGW(TAG, "get_request_header: No current request context");
-        return NULL;
+        return -1;
+    }
+
+    if (!name || !buffer || buffer_size <= 0) {
+        ESP_LOGE(TAG, "get_request_header: Invalid parameters");
+        return -1;
     }
     
-    if (!name) {
-        ESP_LOGE(TAG, "get_request_header: Invalid header name");
-        return NULL;
+    if (!tls_current_request->headers) {
+        return -1;  // No headers
     }
     
-    const char* value = find_header_value(tls_current_request->headers, name);
-    ESP_LOGD(TAG, "get_request_header: %s = %s", name, value ? value : "NULL");
-    return value;
+    // Inline header search - no static buffers!
+    size_t name_len = strlen(name);
+    const char* pos = tls_current_request->headers;
+    
+    while (*pos) {
+        // Find header name (before colon)
+        const char* colon = strchr(pos, ':');
+        if (!colon) break;
+        
+        // Check if header name matches (case-insensitive)
+        if ((colon - pos) == name_len && strncasecmp(pos, name, name_len) == 0) {
+            // Found header, skip colon and whitespace
+            const char* value = colon + 1;
+            while (*value == ' ' || *value == '\t') value++;
+            
+            // Find end of value (before \r\n)
+            const char* end = strstr(value, "\r\n");
+            if (!end) end = value + strlen(value);
+            
+            // Copy directly to provided buffer - no static allocation!
+            size_t value_len = end - value;
+            if (value_len >= buffer_size) value_len = buffer_size - 1;
+            
+            strncpy(buffer, value, value_len);
+            buffer[value_len] = '\0';
+            
+            ESP_LOGD(TAG, "get_request_header: %s = %s", name, buffer);
+            return strlen(buffer);
+        }
+        
+        // Move to next line
+        const char* next_line = strstr(pos, "\r\n");
+        if (!next_line) break;
+        pos = next_line + 2;
+    }
+    
+    ESP_LOGD(TAG, "get_request_header: %s not found", name);
+    return -1;  // Not found
 }
 
 int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* name) {
@@ -676,32 +663,36 @@ int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* 
     return -1; // Header not found
 }
 
-const char* mcp_native_list_request_headers(wasm_exec_env_t exec_env) {
-    if (!tls_current_request || !tls_current_request->headers) {
-        return "";
+// List all request headers as comma-separated names - returns length or -1 if error
+int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, int32_t buffer_size) {
+    if (!buffer || buffer_size <= 0) {
+        return -1;
     }
     
-    static char header_list[1024];
-    header_list[0] = '\0';
+    if (!tls_current_request || !tls_current_request->headers) {
+        buffer[0] = '\0';
+        return 0;  // Empty list
+    }
     
+    buffer[0] = '\0';
     const char* pos = tls_current_request->headers;
     size_t list_len = 0;
     
-    while (*pos && list_len < sizeof(header_list) - 50) {
+    while (*pos && list_len < buffer_size - 50) {
         // Find header name (before colon)
         const char* colon = strchr(pos, ':');
         if (!colon) break;
         
         // Add comma if not first header
-        if (list_len > 0) {
-            strcat(header_list, ",");
+        if (list_len > 0 && list_len < buffer_size - 1) {
+            strcat(buffer, ",");
             list_len++;
         }
         
         // Add header name
         size_t name_len = colon - pos;
-        if (list_len + name_len < sizeof(header_list) - 1) {
-            strncat(header_list, pos, name_len);
+        if (list_len + name_len < buffer_size - 1) {
+            strncat(buffer, pos, name_len);
             list_len += name_len;
         }
         
@@ -711,8 +702,8 @@ const char* mcp_native_list_request_headers(wasm_exec_env_t exec_env) {
         pos = next_line + 2;
     }
     
-    ESP_LOGD(TAG, "list_request_headers: %s", header_list);
-    return header_list;
+    ESP_LOGD(TAG, "list_request_headers: %s", buffer);
+    return strlen(buffer);
 }
 
 // ========== Host Function Registration ==========
@@ -759,12 +750,11 @@ NativeSymbol mcp_core_host_functions[] = {
     {"json_create_response", native_json_create_response, "($*~)i", NULL},
     {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
     
-    // HTTP Header Management
-    // DEBUGGING: Commenting out to test if these registrations cause WASM export corruption
+    // HTTP Header Management (using buffer+length pattern)
     {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
-    //{"get_request_header", mcp_native_get_request_header, "($)$", NULL},
+    {"get_request_header", mcp_native_get_request_header, "($*i)i", NULL},
     {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
-    //{"list_request_headers", mcp_native_list_request_headers, "()$", NULL},
+    {"list_request_headers", mcp_native_list_request_headers, "(*i)i", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);

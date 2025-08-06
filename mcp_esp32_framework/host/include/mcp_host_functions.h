@@ -179,13 +179,15 @@ void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** fre
 int32_t mcp_native_set_response_header(wasm_exec_env_t exec_env, const char* name, const char* value);
 
 /**
- * @brief Get HTTP request header from WASM context
+ * @brief Get HTTP request header from WASM context (buffer pattern)
  * 
  * @param exec_env WASM execution environment
  * @param name Header name (case-insensitive)
- * @return const char* Header value or NULL if not found
+ * @param buffer Buffer to write header value
+ * @param buffer_size Size of buffer
+ * @return int32_t Length of header value or -1 if not found
  */
-const char* mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name);
+int32_t mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name, char* buffer, int32_t buffer_size);
 
 /**
  * @brief Remove HTTP response header from WASM context
@@ -197,12 +199,14 @@ const char* mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* 
 int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* name);
 
 /**
- * @brief List all available request headers
+ * @brief List all available request headers (buffer pattern)
  * 
  * @param exec_env WASM execution environment
- * @return const char* Comma-separated list of header names
+ * @param buffer Buffer to write header names (comma-separated)
+ * @param buffer_size Size of buffer
+ * @return int32_t Length of header list or -1 on error
  */
-const char* mcp_native_list_request_headers(wasm_exec_env_t exec_env);
+int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, int32_t buffer_size);
 
 // ========== Request Context Management (Internal) ==========
 

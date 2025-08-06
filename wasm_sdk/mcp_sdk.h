@@ -43,11 +43,11 @@ extern int32_t gpio_is_pin_protected(int32_t pin);
 extern int32_t sse_send_event(const char* event_type, const char* data);
 extern int32_t sse_send_tool_result(const char* tool_name, const char* result);
 
-// HTTP Header Management
+// HTTP Header Management (using buffer+length pattern)
 extern int32_t set_response_header(const char* name, const char* value);
-extern const char* get_request_header(const char* name);
+extern int32_t get_request_header(const char* name, char* buffer, int32_t buffer_size);
 extern int32_t remove_response_header(const char* name);
-extern const char* list_request_headers(void);
+extern int32_t list_request_headers(char* buffer, int32_t buffer_size);
 
 // System Info
 extern int32_t get_tick_count(void);
