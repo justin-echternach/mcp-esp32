@@ -16,7 +16,14 @@ typedef struct {
     char* request_body;
     size_t request_len;
     char* uri;
+    char* headers;
     char response[2048];
+    
+    // Response headers management
+    char* response_headers;
+    size_t response_headers_capacity;
+    size_t response_headers_length;
+    
     esp_err_t result;
     bool completed;
     pthread_mutex_t completion_mutex;

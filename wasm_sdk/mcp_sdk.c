@@ -235,6 +235,17 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
     g_mcp_state = MCP_STATE_INITIALIZING;
     log_info("MCP", "handle_initialize: State set to initializing");
     
+    // Generate session ID and set response header
+    char session_id[64];
+    mcp_generate_session_id(session_id, sizeof(session_id));
+    
+    if (mcp_set_session_header(session_id) != 0) {
+        log_error("MCP", "Failed to set session header");
+        return create_jsonrpc_error(-32000, "Failed to set session header", response, max_len);
+    }
+    
+    log_info("MCP", "Session ID generated and header set");
+    
     // Parse client info from params if needed (protocol version, etc.)
     // For now, just accept any initialize request
     
@@ -599,4 +610,33 @@ static int atoi(const char* str) {
     }
     
     return sign * result;
+}
+
+// ========== Session and Header Management Helpers ==========
+
+// Generate a simple session ID (UUID-like format)
+void mcp_generate_session_id(char* buffer, int32_t size) {
+    if (!buffer || size < 37) return;
+    
+    // Use system tick as a simple pseudo-random source
+    uint32_t tick = get_tick_count();
+    uint32_t heap = get_free_heap();
+    uint32_t uptime = get_uptime_ms();
+    
+    // Create a UUID-like format (not truly random, but unique enough for testing)
+    snprintf(buffer, size, 
+             "%08x-%04x-%04x-%04x-%08x%04x",
+             tick,
+             (uint16_t)(heap & 0xFFFF),
+             (uint16_t)((heap >> 16) & 0xFFFF),
+             (uint16_t)(uptime & 0xFFFF),
+             uptime,
+             (uint16_t)((tick >> 16) & 0xFFFF));
+}
+
+// Set MCP-Session-Id header in response
+int32_t mcp_set_session_header(const char* session_id) {
+    if (!session_id) return -1;
+    
+    return set_response_header("Mcp-Session-Id", session_id);
 }

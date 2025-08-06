@@ -1,5 +1,7 @@
 #include "mcp_host_functions.h"
 #include "mcp_config_loader.h"
+#include "mcp_session_manager.h"
+#include "mcp_pthread_pool.h"
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -16,6 +18,9 @@ static const char* TAG = "MCP_HOST";
 
 // WASM memory alignment size
 #define MALLOC_ALIGN_SIZE 8
+
+// Thread-local storage for current request context (used by header functions)
+static _Thread_local mcp_request_t* tls_current_request = NULL;
 
 // MIN macro if not defined
 #ifndef MIN
@@ -326,24 +331,59 @@ void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** fre
 
 static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
 {
-    // Using automatic string conversion ($$) - no validation needed
-    ESP_LOGI(TAG, "WASM sending SSE event: %s = %s", event_type, data);
-    // TODO: Implement send_sse_event function or move to application-specific code
-    ESP_LOGW(TAG, "SSE event sending not implemented yet");
-    return 0;
+    if (!event_type || !data) {
+        ESP_LOGE(TAG, "SSE_SEND_EVENT: Invalid parameters - event_type=%p, data=%p", event_type, data);
+        return -1;
+    }
+    
+    ESP_LOGD(TAG, "WASM sending SSE event: %s = %s", event_type, data);
+    
+    // Send event to current session using session manager
+    esp_err_t ret = mcp_session_send_to_current(event_type, data);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "SSE event sent successfully");
+        return 0;
+    } else if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "No current session or SSE connection for event");
+        return -2;
+    } else {
+        ESP_LOGE(TAG, "Failed to send SSE event: %s", esp_err_to_name(ret));
+        return -1;
+    }
 }
 
 static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
 {
-    // Using automatic string conversion ($$) - no validation needed
+    if (!tool_name || !result) {
+        ESP_LOGE(TAG, "SSE_SEND_TOOL_RESULT: Invalid parameters - tool_name=%p, result=%p", tool_name, result);
+        return -1;
+    }
     
     // Create JSON-formatted tool result
     char event_data[512];
-    snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
-    // TODO: Implement send_sse_event function or move to application-specific code
-    ESP_LOGI(TAG, "WASM tool result: %s", event_data);
-    ESP_LOGW(TAG, "SSE tool result sending not implemented yet");
-    return 0;
+    int len = snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
+    
+    if (len >= sizeof(event_data)) {
+        ESP_LOGE(TAG, "Tool result too large for buffer (%d >= %zu)", len, sizeof(event_data));
+        return -3;
+    }
+    
+    ESP_LOGD(TAG, "WASM tool result: %s", event_data);
+    
+    // Send tool result event to current session
+    esp_err_t ret = mcp_session_send_to_current("tool_result", event_data);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Tool result sent successfully");
+        return 0;
+    } else if (ret == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "No current session or SSE connection for tool result");
+        return -2;
+    } else {
+        ESP_LOGE(TAG, "Failed to send tool result: %s", esp_err_to_name(ret));
+        return -1;
+    }
 }
 
 // ========== JSON-RPC Protocol Functions (MCP Framework) ==========
@@ -448,6 +488,233 @@ static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, 
     return len < max_len ? 0 : -2; // Buffer overflow
 }
 
+// ========== Request Context Management ==========
+
+void mcp_host_set_request_context(void* request) {
+    tls_current_request = (mcp_request_t*)request;
+}
+
+void mcp_host_clear_request_context(void) {
+    tls_current_request = NULL;
+}
+
+// ========== HTTP Header Management Functions ==========
+
+// Helper function for case-insensitive string comparison
+static int strcasecmp_custom(const char *s1, const char *s2) {
+    while (*s1 && *s2) {
+        char c1 = tolower((unsigned char)*s1);
+        char c2 = tolower((unsigned char)*s2);
+        if (c1 != c2) return c1 - c2;
+        s1++;
+        s2++;
+    }
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+}
+
+// Helper function to find header in string buffer (case-insensitive)
+static const char* find_header_value(const char* headers, const char* name) {
+    if (!headers || !name) return NULL;
+    
+    size_t name_len = strlen(name);
+    const char* pos = headers;
+    
+    while (*pos) {
+        // Find header name (before colon)
+        const char* colon = strchr(pos, ':');
+        if (!colon) break;
+        
+        // Check if header name matches (case-insensitive)
+        if ((colon - pos) == name_len && strncasecmp(pos, name, name_len) == 0) {
+            // Found header, skip colon and whitespace
+            const char* value = colon + 1;
+            while (*value == ' ' || *value == '\t') value++;
+            
+            // Find end of value (before \r\n)
+            const char* end = strstr(value, "\r\n");
+            if (!end) end = value + strlen(value);
+            
+            // Allocate buffer for value (this will be managed by WAMR)
+            static char value_buffer[512];
+            size_t value_len = end - value;
+            if (value_len >= sizeof(value_buffer)) value_len = sizeof(value_buffer) - 1;
+            
+            strncpy(value_buffer, value, value_len);
+            value_buffer[value_len] = '\0';
+            
+            return value_buffer;
+        }
+        
+        // Move to next line
+        const char* next_line = strstr(pos, "\r\n");
+        if (!next_line) break;
+        pos = next_line + 2;
+    }
+    
+    return NULL;
+}
+
+// Helper function to ensure response headers buffer has enough capacity
+static int ensure_response_headers_capacity(mcp_request_t* request, size_t needed) {
+    if (!request->response_headers) {
+        // Initial allocation
+        request->response_headers_capacity = needed > 1024 ? needed : 1024;
+        request->response_headers = malloc(request->response_headers_capacity);
+        if (!request->response_headers) return -1;
+        request->response_headers[0] = '\0';
+        request->response_headers_length = 0;
+    } else if (request->response_headers_length + needed >= request->response_headers_capacity) {
+        // Realloc to larger size
+        size_t new_capacity = (request->response_headers_capacity + needed) * 2;
+        char* new_buffer = realloc(request->response_headers, new_capacity);
+        if (!new_buffer) return -1;
+        request->response_headers = new_buffer;
+        request->response_headers_capacity = new_capacity;
+    }
+    return 0;
+}
+
+int32_t mcp_native_set_response_header(wasm_exec_env_t exec_env, const char* name, const char* value) {
+    if (!tls_current_request) {
+        ESP_LOGE(TAG, "set_response_header: No current request context");
+        return -1;
+    }
+    
+    if (!name || !value) {
+        ESP_LOGE(TAG, "set_response_header: Invalid parameters");
+        return -1;
+    }
+    
+    // Validate header name (basic ASCII check)
+    for (const char* p = name; *p; p++) {
+        if (*p < 0x21 || *p > 0x7E || *p == ':') {
+            ESP_LOGE(TAG, "set_response_header: Invalid header name");
+            return -1;
+        }
+    }
+    
+    // Calculate needed space: "Name: Value\r\n"
+    size_t needed = strlen(name) + strlen(value) + 4;  // ": " + "\r\n"
+    
+    if (ensure_response_headers_capacity(tls_current_request, needed) != 0) {
+        ESP_LOGE(TAG, "set_response_header: Memory allocation failed");
+        return -2;
+    }
+    
+    // Check if header already exists and remove it first
+    mcp_native_remove_response_header(exec_env, name);
+    
+    // Append new header
+    int len = snprintf(tls_current_request->response_headers + tls_current_request->response_headers_length,
+                      tls_current_request->response_headers_capacity - tls_current_request->response_headers_length,
+                      "%s: %s\r\n", name, value);
+    
+    if (len > 0) {
+        tls_current_request->response_headers_length += len;
+        ESP_LOGD(TAG, "set_response_header: %s = %s", name, value);
+        return 0;
+    }
+    
+    return -3;
+}
+
+const char* mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name) {
+    if (!tls_current_request) {
+        ESP_LOGW(TAG, "get_request_header: No current request context");
+        return NULL;
+    }
+    
+    if (!name) {
+        ESP_LOGE(TAG, "get_request_header: Invalid header name");
+        return NULL;
+    }
+    
+    const char* value = find_header_value(tls_current_request->headers, name);
+    ESP_LOGD(TAG, "get_request_header: %s = %s", name, value ? value : "NULL");
+    return value;
+}
+
+int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* name) {
+    if (!tls_current_request || !tls_current_request->response_headers) {
+        return -1;
+    }
+    
+    if (!name) {
+        return -1;
+    }
+    
+    char* headers = tls_current_request->response_headers;
+    size_t name_len = strlen(name);
+    char* pos = headers;
+    
+    while (*pos) {
+        // Find header name
+        char* colon = strchr(pos, ':');
+        if (!colon) break;
+        
+        // Check if this is the header to remove
+        if ((colon - pos) == name_len && strncasecmp(pos, name, name_len) == 0) {
+            // Found header to remove, find end of line
+            char* line_end = strstr(pos, "\r\n");
+            if (line_end) {
+                line_end += 2; // Include \r\n
+                // Move remaining content forward
+                size_t remaining = strlen(line_end);
+                memmove(pos, line_end, remaining + 1);
+                tls_current_request->response_headers_length -= (line_end - pos);
+                ESP_LOGD(TAG, "remove_response_header: Removed %s", name);
+                return 0;
+            }
+        }
+        
+        // Move to next line
+        char* next_line = strstr(pos, "\r\n");
+        if (!next_line) break;
+        pos = next_line + 2;
+    }
+    
+    return -1; // Header not found
+}
+
+const char* mcp_native_list_request_headers(wasm_exec_env_t exec_env) {
+    if (!tls_current_request || !tls_current_request->headers) {
+        return "";
+    }
+    
+    static char header_list[1024];
+    header_list[0] = '\0';
+    
+    const char* pos = tls_current_request->headers;
+    size_t list_len = 0;
+    
+    while (*pos && list_len < sizeof(header_list) - 50) {
+        // Find header name (before colon)
+        const char* colon = strchr(pos, ':');
+        if (!colon) break;
+        
+        // Add comma if not first header
+        if (list_len > 0) {
+            strcat(header_list, ",");
+            list_len++;
+        }
+        
+        // Add header name
+        size_t name_len = colon - pos;
+        if (list_len + name_len < sizeof(header_list) - 1) {
+            strncat(header_list, pos, name_len);
+            list_len += name_len;
+        }
+        
+        // Move to next line
+        const char* next_line = strstr(pos, "\r\n");
+        if (!next_line) break;
+        pos = next_line + 2;
+    }
+    
+    ESP_LOGD(TAG, "list_request_headers: %s", header_list);
+    return header_list;
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -491,6 +758,13 @@ NativeSymbol mcp_core_host_functions[] = {
     {"json_parse_request", native_json_parse_request, "($**i)i", NULL},
     {"json_create_response", native_json_create_response, "($*~)i", NULL},
     {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
+    
+    // HTTP Header Management
+    // DEBUGGING: Commenting out to test if these registrations cause WASM export corruption
+    // {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
+    // {"get_request_header", mcp_native_get_request_header, "($)$", NULL},
+    // {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
+    // {"list_request_headers", mcp_native_list_request_headers, "()$", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);

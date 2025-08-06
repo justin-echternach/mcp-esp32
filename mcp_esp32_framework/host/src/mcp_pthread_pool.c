@@ -1,5 +1,7 @@
 #include "mcp_pthread_pool.h"
 #include "mcp_wasm_runtime.h"
+#include "mcp_session_manager.h"
+#include "mcp_host_functions.h"
 #include <esp_log.h>
 #include <string.h>
 #include <stdlib.h>
@@ -161,12 +163,24 @@ static void* mcp_worker_thread(void* arg) {
 static esp_err_t process_mcp_request(mcp_request_t* req) {
     ESP_LOGI(TAG, "Processing MCP request to %s: %s", req->uri, req->request_body);
     
+    // Extract and set session context for this thread
+    char session_id[MCP_SESSION_ID_LENGTH] = {0};
+    bool has_session = mcp_session_extract_from_request(req->headers, req->uri, req->request_body, session_id);
+    
+    if (has_session) {
+        mcp_session_set_current(session_id);
+        ESP_LOGD(TAG, "Set session context for thread: %s", session_id);
+    } else {
+        ESP_LOGW(TAG, "No session ID found in request");
+    }
+    
     // Find WASM module for this route
     const char* wasm_filename = mcp_wasm_find_file_for_route(req->uri);
     if (!wasm_filename) {
         ESP_LOGW(TAG, "No WASM module configured for route: %s", req->uri);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Route not configured\"},\"id\":1}");
+        mcp_session_clear_current();
         return ESP_FAIL;
     }
     
@@ -180,6 +194,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
         snprintf(req->response, sizeof(req->response), 
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Failed to load WASM module\"},\"id\":1}");
+        mcp_session_clear_current();
         return ESP_FAIL;
     }
     
@@ -211,6 +226,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         ESP_LOGE(TAG, "🔍 DEBUG: Lookup failed - module_inst still: %p", module->wasm_module_inst);
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");
+        mcp_session_clear_current();
         return ESP_FAIL;
     }
     
@@ -232,6 +248,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         ESP_LOGE(TAG, "Failed to get WASM memory pointers");
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM memory mapping failed\"},\"id\":1}");
+        mcp_session_clear_current();
         return ESP_FAIL;
     }
     
@@ -251,10 +268,16 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     ESP_LOGI(TAG, "🔍 DEBUG: WASM memory bounds: request ends at %u, response ends at %u, module has 65536 bytes", 
              (uint32_t)(request_wasm_buffer + req->request_len + 1), (uint32_t)(response_wasm_buffer + response_size));
     
+    // Set request context for host functions
+    mcp_host_set_request_context(req);
+    
     // Clear any previous exceptions
     wasm_runtime_clear_exception(module->wasm_module_inst);
     
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
+    
+    // Clear request context after WASM execution
+    // mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
     
     ESP_LOGI(TAG, "🔍 DEBUG: WASM call result: %s", call_success ? "SUCCESS" : "FAILED");
     
@@ -276,10 +299,15 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         ESP_LOGE(TAG, "WASM MCP handler failed: %s", exception ? exception : "Unknown error");
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM handler failed\"},\"id\":1}");
+        mcp_session_clear_current();
+        // mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
         return ESP_FAIL;
     }
     
     ESP_LOGI(TAG, "✅ MCP request processed successfully in main thread runtime: %s", req->response);
+    
+    // Clear session context for this thread
+    mcp_session_clear_current();
     
     return ESP_OK;
 }
@@ -317,10 +345,43 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req) {
         return ESP_FAIL;
     }
     
+    // Extract important headers for WASM access (limited set for security/size)
+    char header_buffer[1024] = {0};
+    size_t header_len = 0;
+    
+    // List of headers to extract (case will be preserved from ESP-IDF)
+    const char* important_headers[] = {
+        "MCP-Session-ID",      // MCP session management
+        "Mcp-Session-Id",      // MCP spec format
+        "Content-Type",        // Request content type
+        "User-Agent",          // Client identification
+        "Authorization",       // Security/auth tokens
+        "X-Request-ID",        // Request tracing
+        NULL
+    };
+    
+    for (int i = 0; important_headers[i] != NULL && header_len < sizeof(header_buffer) - 100; i++) {
+        char header_value[256];
+        if (httpd_req_get_hdr_value_str(req, important_headers[i], header_value, sizeof(header_value)) == ESP_OK) {
+            int added = snprintf(header_buffer + header_len, sizeof(header_buffer) - header_len,
+                               "%s: %s\r\n", important_headers[i], header_value);
+            if (added > 0 && header_len + added < sizeof(header_buffer)) {
+                header_len += added;
+            }
+        }
+    }
+    
     // Initialize request structure
     mcp_req->request_body = content;
     mcp_req->request_len = ret;
     mcp_req->uri = strdup(req->uri);
+    mcp_req->headers = header_len > 0 ? strdup(header_buffer) : NULL;
+    
+    // Initialize response headers
+    mcp_req->response_headers = NULL;
+    mcp_req->response_headers_capacity = 0;
+    mcp_req->response_headers_length = 0;
+    
     mcp_req->completed = false;
     mcp_req->result = ESP_OK;
     pthread_mutex_init(&mcp_req->completion_mutex, NULL);
@@ -335,6 +396,8 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req) {
         // Cleanup
         free(mcp_req->request_body);
         free(mcp_req->uri);
+        if (mcp_req->headers) free(mcp_req->headers);
+        if (mcp_req->response_headers) free(mcp_req->response_headers);
         pthread_mutex_destroy(&mcp_req->completion_mutex);
         pthread_cond_destroy(&mcp_req->completion_cond);
         free(mcp_req);
@@ -365,6 +428,52 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req) {
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+        
+        // Apply response headers set by WASM module
+        if (mcp_req->response_headers && mcp_req->response_headers_length > 0) {
+            ESP_LOGD(TAG, "Applying response headers: %s", mcp_req->response_headers);
+            
+            // Parse and apply headers from string buffer
+            const char* pos = mcp_req->response_headers;
+            while (*pos) {
+                // Find header name (before colon)
+                const char* colon = strchr(pos, ':');
+                if (!colon) break;
+                
+                // Extract header name
+                size_t name_len = colon - pos;
+                char header_name[128];
+                if (name_len < sizeof(header_name)) {
+                    strncpy(header_name, pos, name_len);
+                    header_name[name_len] = '\0';
+                    
+                    // Find header value (after colon and whitespace)
+                    const char* value = colon + 1;
+                    while (*value == ' ' || *value == '\t') value++;
+                    
+                    // Find end of value (before \r\n)
+                    const char* value_end = strstr(value, "\r\n");
+                    if (value_end) {
+                        size_t value_len = value_end - value;
+                        char header_value[256];
+                        if (value_len < sizeof(header_value)) {
+                            strncpy(header_value, value, value_len);
+                            header_value[value_len] = '\0';
+                            
+                            // Apply header to HTTP response
+                            httpd_resp_set_hdr(req, header_name, header_value);
+                            ESP_LOGD(TAG, "Applied header: %s = %s", header_name, header_value);
+                        }
+                    }
+                }
+                
+                // Move to next line
+                const char* next_line = strstr(pos, "\r\n");
+                if (!next_line) break;
+                pos = next_line + 2;
+            }
+        }
+        
         httpd_resp_send(req, mcp_req->response, strlen(mcp_req->response));
         
         ESP_LOGI(TAG, "MCP response sent: %s", mcp_req->response);
@@ -373,6 +482,8 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req) {
     // Cleanup request structure
     free(mcp_req->request_body);
     free(mcp_req->uri);
+    if (mcp_req->headers) free(mcp_req->headers);
+    if (mcp_req->response_headers) free(mcp_req->response_headers);
     pthread_mutex_destroy(&mcp_req->completion_mutex);
     pthread_cond_destroy(&mcp_req->completion_cond);
     free(mcp_req);

@@ -169,6 +169,15 @@ esp_err_t mcp_sse_send_simple(httpd_req_t *req, const char* event_type, const ch
 esp_err_t mcp_sse_close_connection(httpd_req_t *req);
 
 /**
+ * @brief Register SSE endpoint with session manager integration
+ * 
+ * @param server HTTP server handle
+ * @param uri URI pattern for SSE endpoint (typically "/sse")
+ * @return esp_err_t ESP_OK on success
+ */
+esp_err_t mcp_http_register_sse_endpoint(httpd_handle_t server, const char* uri);
+
+/**
  * @brief Built-in SSE demo handler
  * 
  * This demonstrates how to implement SSE endpoints. Applications can use this

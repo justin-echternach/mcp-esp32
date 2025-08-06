@@ -27,6 +27,7 @@
 #include "../mcp_esp32_framework/host/include/mcp_http_server.h"
 #include "../mcp_esp32_framework/host/include/mcp_wifi_minimal.h"
 #include "../mcp_esp32_framework/host/include/mcp_wasm_runtime.h"
+#include "../mcp_esp32_framework/host/include/mcp_session_manager.h"
 // Note: mcp_types.h not needed yet - types defined in mcp_pthread_pool.h
 
 // SD Card includes
@@ -187,78 +188,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
     return httpd_resp_send(req, html, strlen(html));
 }
 
-// SSE handler for event stream - sends real-time LED status
-static esp_err_t sse_handler(httpd_req_t *req) {
-    ESP_LOGI(TAG, "SSE client connecting...");
-    
-    // Set SSE headers
-    httpd_resp_set_type(req, "text/event-stream");
-    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_set_hdr(req, "Connection", "keep-alive");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-    
-    // Send initial welcome event
-    const char *welcome = "event: connected\ndata: Connected to ESP32 LED Controller\n\n";
-    if (httpd_resp_send_chunk(req, welcome, strlen(welcome)) != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send welcome SSE event");
-        return ESP_FAIL;
-    }
-    
-    // Send initial LED status
-    if (g_led_state_mutex) {
-        if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-            char led_event[64];
-            snprintf(led_event, sizeof(led_event), 
-                    "event: led_status\ndata: %s\n\n", 
-                    g_led_state ? "ON" : "OFF");
-            httpd_resp_send_chunk(req, led_event, strlen(led_event));
-            xSemaphoreGive(g_led_state_mutex);
-        }
-    }
-    
-    ESP_LOGI(TAG, "SSE client connected, streaming LED status");
-    
-    // Stream LED status changes in real-time
-    while (true) {
-        bool state_changed = false;
-        bool current_state = false;
-        
-        // Check if LED state has changed
-        if (g_led_state_mutex) {
-            if (xSemaphoreTake(g_led_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-                if (g_led_state_changed) {
-                    state_changed = true;
-                    current_state = g_led_state;
-                    g_led_state_changed = false; // Reset change flag
-                }
-                xSemaphoreGive(g_led_state_mutex);
-            }
-        }
-        
-        // Send LED status event if state changed
-        if (state_changed) {
-            char led_event[64];
-            snprintf(led_event, sizeof(led_event), 
-                    "event: led_status\ndata: %s\n\n", 
-                    current_state ? "ON" : "OFF");
-            
-            if (httpd_resp_send_chunk(req, led_event, strlen(led_event)) != ESP_OK) {
-                ESP_LOGW(TAG, "SSE client disconnected");
-                break;
-            }
-            
-            ESP_LOGI(TAG, "Sent LED status via SSE: %s", current_state ? "ON" : "OFF");
-        }
-        
-        // Short delay to avoid busy waiting
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    
-    // Close the chunked response
-    httpd_resp_send_chunk(req, NULL, 0);
-    ESP_LOGI(TAG, "SSE connection closed");
-    return ESP_OK;
-}
+// SSE handler moved to session manager - now accessible at /sse endpoint
 
 // API endpoint to toggle LED via WASM
 // MCP WASM Module Management moved to mcp_wasm_runtime framework
@@ -339,7 +269,6 @@ static httpd_handle_t start_webserver(void) {
     // Register project-specific handlers
     mcp_http_handler_t project_handlers[] = {
         {"/", HTTP_GET, root_handler, NULL},
-        {"/events", HTTP_GET, sse_handler, NULL},
         {"/api/led/toggle", HTTP_POST, led_toggle_handler, NULL},
         {"/health", HTTP_GET, mcp_http_health_handler, NULL}  // Built-in framework handler
     };
@@ -348,6 +277,14 @@ static httpd_handle_t start_webserver(void) {
                                                sizeof(project_handlers) / sizeof(project_handlers[0]));
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register project-specific handlers");
+        mcp_http_server_stop(server);
+        return NULL;
+    }
+    
+    // Register SSE endpoint with session manager integration
+    ret = mcp_http_register_sse_endpoint(server, "/sse");
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register SSE endpoint");
         mcp_http_server_stop(server);
         return NULL;
     }
@@ -811,6 +748,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Initializing MCP module registry...");
     if (!mcp_wasm_registry_init()) {
         ESP_LOGE(TAG, "Failed to initialize MCP module registry");
+        return;
+    }
+    
+    // Initialize MCP session manager
+    ESP_LOGI(TAG, "Initializing MCP session manager...");
+    ret = mcp_session_manager_init(NULL);  // Use default configuration
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize MCP session manager: %s", esp_err_to_name(ret));
         return;
     }
     

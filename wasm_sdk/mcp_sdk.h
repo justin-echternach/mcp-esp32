@@ -43,6 +43,12 @@ extern int32_t gpio_is_pin_protected(int32_t pin);
 extern int32_t sse_send_event(const char* event_type, const char* data);
 extern int32_t sse_send_tool_result(const char* tool_name, const char* result);
 
+// HTTP Header Management
+extern int32_t set_response_header(const char* name, const char* value);
+extern const char* get_request_header(const char* name);
+extern int32_t remove_response_header(const char* name);
+extern const char* list_request_headers(void);
+
 // System Info
 extern int32_t get_tick_count(void);
 extern int32_t get_free_heap(void);
@@ -81,6 +87,10 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
 // Helper functions for creating results
 mcp_result_t mcp_success(const char* data);
 mcp_result_t mcp_error(int32_t code, const char* message);
+
+// Session and header management helpers
+void mcp_generate_session_id(char* buffer, int32_t size);
+int32_t mcp_set_session_header(const char* session_id);
 
 // JSON parsing helpers for tool parameters
 int32_t mcp_parse_int_param(const char* params, const char* key, int32_t* value);

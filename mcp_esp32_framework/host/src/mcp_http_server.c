@@ -1,4 +1,5 @@
 #include "mcp_http_server.h"
+#include "mcp_session_manager.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -354,6 +355,35 @@ esp_err_t mcp_sse_close_connection(httpd_req_t *req) {
     }
     
     return ret;
+}
+
+esp_err_t mcp_http_register_sse_endpoint(httpd_handle_t server, const char* uri) {
+    if (!server) {
+        ESP_LOGE(TAG, "Server handle is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    if (!uri) {
+        ESP_LOGE(TAG, "SSE URI is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    // Register GET handler for SSE endpoint using session manager
+    httpd_uri_t sse_uri = {
+        .uri = uri,
+        .method = HTTP_GET,
+        .handler = mcp_session_sse_handler,  // Use session manager's SSE handler
+        .user_ctx = NULL
+    };
+    
+    esp_err_t ret = httpd_register_uri_handler(server, &sse_uri);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register SSE endpoint %s: %s", uri, esp_err_to_name(ret));
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "Registered SSE endpoint: %s", uri);
+    return ESP_OK;
 }
 
 esp_err_t mcp_http_sse_demo_handler(httpd_req_t *req) {

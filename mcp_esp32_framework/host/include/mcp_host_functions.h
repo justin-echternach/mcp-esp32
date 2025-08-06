@@ -166,6 +166,58 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
  */
 void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** free_func);
 
+// ========== HTTP Header Management Functions ==========
+
+/**
+ * @brief Set HTTP response header from WASM context
+ * 
+ * @param exec_env WASM execution environment
+ * @param name Header name
+ * @param value Header value  
+ * @return int32_t 0 on success, negative on error
+ */
+int32_t mcp_native_set_response_header(wasm_exec_env_t exec_env, const char* name, const char* value);
+
+/**
+ * @brief Get HTTP request header from WASM context
+ * 
+ * @param exec_env WASM execution environment
+ * @param name Header name (case-insensitive)
+ * @return const char* Header value or NULL if not found
+ */
+const char* mcp_native_get_request_header(wasm_exec_env_t exec_env, const char* name);
+
+/**
+ * @brief Remove HTTP response header from WASM context
+ * 
+ * @param exec_env WASM execution environment
+ * @param name Header name
+ * @return int32_t 0 on success, -1 if header not found
+ */
+int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* name);
+
+/**
+ * @brief List all available request headers
+ * 
+ * @param exec_env WASM execution environment
+ * @return const char* Comma-separated list of header names
+ */
+const char* mcp_native_list_request_headers(wasm_exec_env_t exec_env);
+
+// ========== Request Context Management (Internal) ==========
+
+/**
+ * @brief Set current request context for header functions (internal use)
+ * 
+ * @param request Current MCP request structure
+ */
+void mcp_host_set_request_context(void* request);
+
+/**
+ * @brief Clear current request context (internal use)
+ */
+void mcp_host_clear_request_context(void);
+
 // ========== Host Function Registration ==========
 
 /**
