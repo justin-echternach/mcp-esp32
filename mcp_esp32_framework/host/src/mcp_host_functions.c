@@ -761,10 +761,10 @@ NativeSymbol mcp_core_host_functions[] = {
     
     // HTTP Header Management
     // DEBUGGING: Commenting out to test if these registrations cause WASM export corruption
-    // {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
-    // {"get_request_header", mcp_native_get_request_header, "($)$", NULL},
-    // {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
-    // {"list_request_headers", mcp_native_list_request_headers, "()$", NULL},
+    {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
+    //{"get_request_header", mcp_native_get_request_header, "($)$", NULL},
+    {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
+    //{"list_request_headers", mcp_native_list_request_headers, "()$", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);
