@@ -14,7 +14,6 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
 static int32_t handle_initialized(char* response, int32_t max_len);
 static int32_t handle_tools_list(char* response, int32_t max_len);
 static int32_t handle_tools_call(const char* params, char* response, int32_t max_len);
-static int atoi(const char* str);
 static int32_t extract_json_id(const char* json);
 static int32_t create_jsonrpc_response(const char* result, char* response, int32_t max_len);
 static int32_t create_jsonrpc_error(int32_t code, const char* message, char* response, int32_t max_len);
@@ -577,24 +576,6 @@ static int32_t create_jsonrpc_error(int32_t code, const char* message, char* res
         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%d}",
         code, message, g_current_request_id);
     return len < max_len ? 0 : -2;
-}
-
-// Simple atoi implementation (if not available)
-static int atoi(const char* str) {
-    int result = 0;
-    int sign = 1;
-    
-    if (*str == '-') {
-        sign = -1;
-        str++;
-    }
-    
-    while (*str >= '0' && *str <= '9') {
-        result = result * 10 + (*str - '0');
-        str++;
-    }
-    
-    return sign * result;
 }
 
 // ========== Session and Header Management Helpers ==========

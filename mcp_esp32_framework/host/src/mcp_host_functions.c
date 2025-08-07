@@ -11,6 +11,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "mcp_config.h"
 #include "mcp_http_server.h"
 
@@ -170,6 +171,14 @@ int32_t mcp_native_strstr(wasm_exec_env_t exec_env, const char* haystack, const 
     return wasm_addr;
 }
 
+int32_t mcp_native_atoi(wasm_exec_env_t exec_env, const char* str) {
+    if (!str) {
+        return 0;
+    }
+    
+    return atoi(str);
+}
+
 // ========== Memory Functions ==========
 
 int32_t mcp_native_memcpy(wasm_exec_env_t exec_env, void* dest, const void* src, int32_t n) {
@@ -317,6 +326,161 @@ static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pi
         }
     }
     return 0; // Not protected
+}
+
+// ========== PWM Functions (LEDC-based for Music/Speaker Control) ==========
+
+#define PWM_TIMER_RESOLUTION    LEDC_TIMER_12_BIT
+#define PWM_MODE               LEDC_LOW_SPEED_MODE
+#define PWM_TIMER              LEDC_TIMER_0
+#define PWM_CHANNEL            LEDC_CHANNEL_0
+#define PWM_DUTY_MAX           ((1 << PWM_TIMER_RESOLUTION) - 1)  // 4095 for 12-bit
+
+static bool pwm_initialized = false;
+static int32_t pwm_current_pin = -1;
+
+static int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
+{
+    // Validate parameters
+    if (pin < 0 || pin >= 40) {
+        ESP_LOGE(TAG, "PWM: Invalid pin %d", pin);
+        return -1;
+    }
+    
+    if (frequency < 1 || frequency > 40000) {  // 1Hz to 40kHz range
+        ESP_LOGE(TAG, "PWM: Invalid frequency %d Hz", frequency);
+        return -2;
+    }
+    
+    // Check if pin is protected
+    if (pin >= 0 && pin < 40) {
+        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
+            if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
+                ESP_LOGW(TAG, "PWM: Pin %d is protected, access denied", pin);
+                return -3;
+            }
+        }
+    }
+    
+    esp_err_t err;
+    
+    // Configure timer
+    ledc_timer_config_t timer_config = {
+        .duty_resolution = PWM_TIMER_RESOLUTION,
+        .freq_hz = frequency,
+        .speed_mode = PWM_MODE,
+        .timer_num = PWM_TIMER,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    
+    err = ledc_timer_config(&timer_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Timer config failed: %s", esp_err_to_name(err));
+        return -4;
+    }
+    
+    // Configure channel
+    ledc_channel_config_t channel_config = {
+        .channel = PWM_CHANNEL,
+        .duty = 0,  // Start with 0% duty
+        .gpio_num = pin,
+        .speed_mode = PWM_MODE,
+        .hpoint = 0,
+        .timer_sel = PWM_TIMER
+    };
+    
+    err = ledc_channel_config(&channel_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Channel config failed: %s", esp_err_to_name(err));
+        return -5;
+    }
+    
+    pwm_initialized = true;
+    pwm_current_pin = pin;
+    
+    ESP_LOGI(TAG, "PWM: Initialized pin %d at %d Hz", pin, frequency);
+    return 0;
+}
+
+static int32_t native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent)
+{
+    if (!pwm_initialized || pwm_current_pin != pin) {
+        ESP_LOGE(TAG, "PWM: Not initialized for pin %d", pin);
+        return -1;
+    }
+    
+    if (duty_percent < 0 || duty_percent > 100) {
+        ESP_LOGE(TAG, "PWM: Invalid duty cycle %d%% (0-100 required)", duty_percent);
+        return -2;
+    }
+    
+    // Convert percentage to duty value (0-4095 for 12-bit)
+    uint32_t duty = (duty_percent * PWM_DUTY_MAX) / 100;
+    
+    esp_err_t err = ledc_set_duty(PWM_MODE, PWM_CHANNEL, duty);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Set duty failed: %s", esp_err_to_name(err));
+        return -3;
+    }
+    
+    err = ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Update duty failed: %s", esp_err_to_name(err));
+        return -4;
+    }
+    
+    ESP_LOGD(TAG, "PWM: Pin %d duty set to %d%% (raw: %lu)", pin, duty_percent, duty);
+    return 0;
+}
+
+static int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin)
+{
+    if (!pwm_initialized || pwm_current_pin != pin) {
+        ESP_LOGW(TAG, "PWM: Stop called but not initialized for pin %d", pin);
+        return 0;  // Not an error, just no-op
+    }
+    
+    // Set duty to 0 to stop output
+    esp_err_t err = ledc_set_duty(PWM_MODE, PWM_CHANNEL, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Stop duty set failed: %s", esp_err_to_name(err));
+        return -1;
+    }
+    
+    err = ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Stop duty update failed: %s", esp_err_to_name(err));
+        return -2;
+    }
+    
+    // Optional: Stop the timer (this will affect all channels using this timer)
+    // ledc_timer_pause(PWM_MODE, PWM_TIMER);
+    
+    ESP_LOGI(TAG, "PWM: Stopped pin %d", pin);
+    return 0;
+}
+
+static int32_t native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
+{
+    if (!pwm_initialized || pwm_current_pin != pin) {
+        ESP_LOGE(TAG, "PWM: Not initialized for pin %d", pin);
+        return -1;
+    }
+    
+    if (frequency < 1 || frequency > 40000) {
+        ESP_LOGE(TAG, "PWM: Invalid frequency %d Hz", frequency);
+        return -2;
+    }
+    
+    // Update timer frequency
+    esp_err_t err = ledc_set_freq(PWM_MODE, PWM_TIMER, frequency);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PWM: Set frequency failed: %s", esp_err_to_name(err));
+        return -3;
+    }
+    
+    ESP_LOGD(TAG, "PWM: Pin %d frequency updated to %d Hz", pin, frequency);
+    return 0;
 }
 
 // ========== WAMR Memory Allocator Access Functions ==========
@@ -720,6 +884,7 @@ NativeSymbol mcp_core_host_functions[] = {
     {"strcat", mcp_native_strcat, "($$)i", NULL},
     {"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
     {"strstr", mcp_native_strstr, "($$)i", NULL},
+    {"atoi", mcp_native_atoi, "($)i", NULL},
     
     // Memory functions
     {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
@@ -740,6 +905,12 @@ NativeSymbol mcp_core_host_functions[] = {
     {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
     {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
     {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
+    
+    // PWM Control (LEDC-based for music/speaker control)
+    {"pwm_init", native_pwm_init, "(ii)i", NULL},
+    {"pwm_set_duty", native_pwm_set_duty, "(ii)i", NULL},
+    {"pwm_stop", native_pwm_stop, "(i)i", NULL},
+    {"pwm_set_frequency", native_pwm_set_frequency, "(ii)i", NULL},
     
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},

@@ -51,11 +51,20 @@ extern void free(void* ptr);
 // Host-provided formatting function
 extern int snprintf(char* buffer, unsigned long size, const char* format, ...);
 
+// Host-provided conversion function
+extern int atoi(const char* str);
+
 // GPIO Control
 extern int32_t gpio_set_level(int32_t pin, int32_t level);
 extern int32_t gpio_get_level(int32_t pin);
 extern int32_t gpio_set_direction(int32_t pin, int32_t direction);
 extern int32_t gpio_is_pin_protected(int32_t pin);
+
+// PWM Control (for music/speaker applications)
+extern int32_t pwm_init(int32_t pin, int32_t frequency);
+extern int32_t pwm_set_duty(int32_t pin, int32_t duty_percent);
+extern int32_t pwm_stop(int32_t pin);
+extern int32_t pwm_set_frequency(int32_t pin, int32_t frequency);
 
 // SSE Events
 extern int32_t sse_send_event(const char* event_type, const char* data);

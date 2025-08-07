@@ -152,6 +152,47 @@ int32_t mcp_native_get_uptime_ms(wasm_exec_env_t exec_env);
  */
 int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
 
+// ========== PWM Control Functions (LEDC-based) ==========
+
+/**
+ * @brief Initialize PWM output on specified pin with frequency
+ * 
+ * @param exec_env WASM execution environment
+ * @param pin GPIO pin number (0-39, must not be protected)
+ * @param frequency PWM frequency in Hz (1-40000)
+ * @return 0 on success, negative on error
+ */
+int32_t mcp_native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
+
+/**
+ * @brief Set PWM duty cycle percentage
+ * 
+ * @param exec_env WASM execution environment
+ * @param pin GPIO pin number (must be previously initialized)
+ * @param duty_percent Duty cycle percentage (0-100)
+ * @return 0 on success, negative on error
+ */
+int32_t mcp_native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent);
+
+/**
+ * @brief Stop PWM output on specified pin
+ * 
+ * @param exec_env WASM execution environment
+ * @param pin GPIO pin number
+ * @return 0 on success, negative on error
+ */
+int32_t mcp_native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin);
+
+/**
+ * @brief Update PWM frequency without reinitializing
+ * 
+ * @param exec_env WASM execution environment
+ * @param pin GPIO pin number (must be previously initialized)
+ * @param frequency New PWM frequency in Hz (1-40000)
+ * @return 0 on success, negative on error
+ */
+int32_t mcp_native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
+
 // ========== WAMR Runtime Memory Allocators (ESP32-specific) ==========
 
 /**
