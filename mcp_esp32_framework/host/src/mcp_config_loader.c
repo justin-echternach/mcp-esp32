@@ -209,36 +209,64 @@ bool mcp_config_load_from_json(mcp_config_t* config, const char* json_string) {
         if (routes_obj) {
             routes_obj++; // Skip the opening brace
             
-            // Parse individual route entries
-            const char* route_patterns[] = {"\"/mcp\"", "\"/mcp/led\"", "\"/mcp/gpio\"", "\"/mcp/system\""};
-            const char* route_names[] = {"/mcp", "/mcp/led", "/mcp/gpio", "/mcp/system"};
+            // Parse all route entries dynamically
+            const char* pos = routes_obj;
             
-            for (int i = 0; i < 4 && config->route_count < MAX_MCP_ROUTES; i++) {
-                const char* route_entry = strstr(routes_obj, route_patterns[i]);
-                if (route_entry) {
-                    // Find the value after the colon
-                    const char* colon = strchr(route_entry, ':');
-                    if (colon) {
-                        colon++; // Skip colon
-                        while (*colon == ' ' || *colon == '\t') colon++; // Skip whitespace
-                        
-                        if (*colon == '"') {
-                            colon++; // Skip opening quote
-                            char wasm_file[MAX_FILENAME_LENGTH];
-                            int j = 0;
-                            while (*colon && *colon != '"' && j < MAX_FILENAME_LENGTH - 1) {
-                                wasm_file[j++] = *colon++;
-                            }
-                            wasm_file[j] = '\0';
-                            
-                            // Store the route
-                            strncpy(config->routes[config->route_count].route, route_names[i], MAX_ROUTE_LENGTH - 1);
-                            strncpy(config->routes[config->route_count].wasm_file, wasm_file, MAX_FILENAME_LENGTH - 1);
-                            config->route_count++;
-                            
-                            ESP_LOGI(TAG, "Parsed route: %s -> %s", route_names[i], wasm_file);
-                        }
+            while (*pos && config->route_count < MAX_MCP_ROUTES) {
+                // Skip whitespace and commas
+                while (*pos && (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r' || *pos == ',')) pos++;
+                
+                // Check if we've reached the end of the routes object
+                if (*pos == '}') break;
+                
+                // Look for the opening quote of a route key
+                if (*pos == '"') {
+                    pos++; // Skip opening quote
+                    
+                    // Extract the route path
+                    char route_path[MAX_ROUTE_LENGTH];
+                    int route_len = 0;
+                    while (*pos && *pos != '"' && route_len < MAX_ROUTE_LENGTH - 1) {
+                        route_path[route_len++] = *pos++;
                     }
+                    route_path[route_len] = '\0';
+                    
+                    if (*pos == '"') pos++; // Skip closing quote
+                    
+                    // Skip to the colon
+                    while (*pos && *pos != ':') pos++;
+                    if (*pos == ':') pos++;
+                    
+                    // Skip whitespace
+                    while (*pos && (*pos == ' ' || *pos == '\t')) pos++;
+                    
+                    // Extract the WASM filename
+                    if (*pos == '"') {
+                        pos++; // Skip opening quote
+                        
+                        char wasm_file[MAX_FILENAME_LENGTH];
+                        int file_len = 0;
+                        while (*pos && *pos != '"' && file_len < MAX_FILENAME_LENGTH - 1) {
+                            wasm_file[file_len++] = *pos++;
+                        }
+                        wasm_file[file_len] = '\0';
+                        
+                        if (*pos == '"') pos++; // Skip closing quote
+                        
+                        // Store the route
+                        strncpy(config->routes[config->route_count].route, route_path, MAX_ROUTE_LENGTH - 1);
+                        config->routes[config->route_count].route[MAX_ROUTE_LENGTH - 1] = '\0';
+                        
+                        strncpy(config->routes[config->route_count].wasm_file, wasm_file, MAX_FILENAME_LENGTH - 1);
+                        config->routes[config->route_count].wasm_file[MAX_FILENAME_LENGTH - 1] = '\0';
+                        
+                        config->route_count++;
+                        
+                        ESP_LOGI(TAG, "Parsed route: %s -> %s", route_path, wasm_file);
+                    }
+                } else {
+                    // Skip to next entry if we can't parse this one
+                    pos++;
                 }
             }
         }

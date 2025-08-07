@@ -7,6 +7,7 @@
   "routes": {
     "/mcp": "default.was",
     "/mcp/led": "led_ctrl.was",
+    "/mcp/music": "music_p.was",
     "/mcp/gpio": "gpio_ctl.was",
     "/mcp/system": "sys_info.was"
   }

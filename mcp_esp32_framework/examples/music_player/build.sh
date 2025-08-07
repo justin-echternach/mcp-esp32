@@ -11,7 +11,7 @@ echo "Building Music Player example..."
 # Use the framework build tool
 "$FRAMEWORK_ROOT/tools/build_wasm.sh" \
     -s "$FRAMEWORK_ROOT/wasm_sdk" \
-    -o music_player \
+    -o music_p \
     -v \
     "$SCRIPT_DIR/music_player.c"
 

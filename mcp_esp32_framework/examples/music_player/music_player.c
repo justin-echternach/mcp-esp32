@@ -12,42 +12,105 @@
 
 // Note frequency table (A4 = 440Hz reference)
 typedef struct {
-    const char* note_name;
+    char note_name[4];  // Store as char array instead of pointer
     float frequency;
 } note_freq_t;
 
-// Chromatic scale from C4 to B7 (48 notes)
-static const note_freq_t note_frequencies[] = {
-    // C4 octave (Middle C octave)
-    {"C4",  261.63f}, {"C#4", 277.18f}, {"Db4", 277.18f}, {"D4",  293.66f},
-    {"D#4", 311.13f}, {"Eb4", 311.13f}, {"E4",  329.63f}, {"F4",  349.23f},
-    {"F#4", 369.99f}, {"Gb4", 369.99f}, {"G4",  392.00f}, {"G#4", 415.30f},
-    {"Ab4", 415.30f}, {"A4",  440.00f}, {"A#4", 466.16f}, {"Bb4", 466.16f},
-    {"B4",  493.88f},
-    
-    // C5 octave
-    {"C5",  523.25f}, {"C#5", 554.37f}, {"Db5", 554.37f}, {"D5",  587.33f},
-    {"D#5", 622.25f}, {"Eb5", 622.25f}, {"E5",  659.25f}, {"F5",  698.46f},
-    {"F#5", 739.99f}, {"Gb5", 739.99f}, {"G5",  783.99f}, {"G#5", 830.61f},
-    {"Ab5", 830.61f}, {"A5",  880.00f}, {"A#5", 932.33f}, {"Bb5", 932.33f},
-    {"B5",  987.77f},
-    
-    // C6 octave
-    {"C6",  1046.50f}, {"C#6", 1108.73f}, {"Db6", 1108.73f}, {"D6",  1174.66f},
-    {"D#6", 1244.51f}, {"Eb6", 1244.51f}, {"E6",  1318.51f}, {"F6",  1396.91f},
-    {"F#6", 1479.98f}, {"Gb6", 1479.98f}, {"G6",  1567.98f}, {"G#6", 1661.22f},
-    {"Ab6", 1661.22f}, {"A6",  1760.00f}, {"A#6", 1864.66f}, {"Bb6", 1864.66f},
-    {"B6",  1975.53f},
-    
-    // C7 octave
-    {"C7",  2093.00f}, {"C#7", 2217.46f}, {"Db7", 2217.46f}, {"D7",  2349.32f},
-    {"D#7", 2489.02f}, {"Eb7", 2489.02f}, {"E7",  2637.02f}, {"F7",  2793.83f},
-    {"F#7", 2959.96f}, {"Gb7", 2959.96f}, {"G7",  3135.96f}, {"G#7", 3322.44f},
-    {"Ab7", 3322.44f}, {"A7",  3520.00f}, {"A#7", 3729.31f}, {"Bb7", 3729.31f},
-    {"B7",  3951.07f}
-};
+// Global pointer to heap-allocated frequency table
+static note_freq_t* note_frequencies = NULL;
+static int note_count = 68;  // Total notes from C4 to B7
 
-static const int note_count = sizeof(note_frequencies) / sizeof(note_freq_t);
+// Initialize note frequency table on heap
+static void init_note_frequencies(void) {
+    if (note_frequencies != NULL) return;  // Already initialized
+    
+    // Allocate memory for all notes
+    note_frequencies = (note_freq_t*)malloc(note_count * sizeof(note_freq_t));
+    if (!note_frequencies) {
+        log_error("MUSIC", "Failed to allocate note frequency table");
+        return;
+    }
+    
+    int idx = 0;
+    
+    // C4 octave (Middle C octave) - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','4','\0'}, 261.63f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','4','\0'}, 277.18f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','4','\0'}, 277.18f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','4','\0'}, 293.66f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','4','\0'}, 311.13f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','4','\0'}, 311.13f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','4','\0'}, 329.63f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','4','\0'}, 349.23f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','4','\0'}, 369.99f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','4','\0'}, 369.99f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','4','\0'}, 392.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','4','\0'}, 415.30f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','4','\0'}, 415.30f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','4','\0'}, 440.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','4','\0'}, 466.16f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','4','\0'}, 466.16f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','4','\0'}, 493.88f}; idx++;
+    
+    // C5 octave - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','5','\0'}, 523.25f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','5','\0'}, 554.37f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','5','\0'}, 554.37f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','5','\0'}, 587.33f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','5','\0'}, 622.25f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','5','\0'}, 622.25f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','5','\0'}, 659.25f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','5','\0'}, 698.46f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','5','\0'}, 739.99f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','5','\0'}, 739.99f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','5','\0'}, 783.99f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','5','\0'}, 830.61f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','5','\0'}, 830.61f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','5','\0'}, 880.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','5','\0'}, 932.33f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','5','\0'}, 932.33f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','5','\0'}, 987.77f}; idx++;
+    
+    // C6 octave - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','6','\0'}, 1046.50f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','6','\0'}, 1108.73f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','6','\0'}, 1108.73f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','6','\0'}, 1174.66f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','6','\0'}, 1244.51f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','6','\0'}, 1244.51f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','6','\0'}, 1318.51f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','6','\0'}, 1396.91f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','6','\0'}, 1479.98f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','6','\0'}, 1479.98f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','6','\0'}, 1567.98f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','6','\0'}, 1661.22f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','6','\0'}, 1661.22f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','6','\0'}, 1760.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','6','\0'}, 1864.66f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','6','\0'}, 1864.66f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','6','\0'}, 1975.53f}; idx++;
+    
+    // C7 octave - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','7','\0'}, 2093.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','7','\0'}, 2217.46f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','7','\0'}, 2217.46f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','7','\0'}, 2349.32f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','7','\0'}, 2489.02f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','7','\0'}, 2489.02f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','7','\0'}, 2637.02f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','7','\0'}, 2793.83f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','7','\0'}, 2959.96f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','7','\0'}, 2959.96f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','7','\0'}, 3135.96f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','7','\0'}, 3322.44f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','7','\0'}, 3322.44f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','7','\0'}, 3520.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','7','\0'}, 3729.31f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','7','\0'}, 3729.31f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','7','\0'}, 3951.07f}; idx++;
+    
+    log_info("MUSIC", "Note frequency table initialized on heap");
+}
 
 // Global state
 static int current_volume = DEFAULT_VOLUME;
@@ -175,7 +238,7 @@ mcp_result_t set_volume_handler(const char* params) {
 
 // Helper: Get frequency for a note name
 static float get_note_frequency(const char* note) {
-    if (!note) return 0.0f;
+    if (!note || !note_frequencies) return 0.0f;
     
     for (int i = 0; i < note_count; i++) {
         if (wasm_strcmp(note, note_frequencies[i].note_name) == 0) {
@@ -267,6 +330,9 @@ static mcp_tool_t music_tools[] = {
 // Module initialization
 void _start(void) {
     log_info("MUSIC", "Music Player module starting");
+    
+    // Initialize note frequency table on heap first
+    init_note_frequencies();
     
     // Initialize MCP server
     if (mcp_server_init("music_player", "1.0.0") != 0) {
