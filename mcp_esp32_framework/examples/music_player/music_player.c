@@ -5,7 +5,7 @@
 // This demonstrates how to implement a music player using PWM for speaker control
 
 // Configuration
-#define DEFAULT_PWM_PIN 25
+#define DEFAULT_PWM_PIN 26
 #define DEFAULT_VOLUME 50  // 0-100%
 #define MAX_NOTE_LENGTH 8  // "C#7:1000"
 #define MAX_MELODY_LENGTH 512
@@ -157,9 +157,9 @@ mcp_result_t play_note_handler(const char* params) {
         return result;
     }
     
-    // Create success response
+    // Create human-readable success response
     snprintf(result_json, sizeof(result_json),
-        "{\"note\":\"%s\",\"duration\":%d,\"volume\":%d,\"pin\":%d}",
+        "Playing note %s for %dms at volume %d%% on GPIO pin %d",
         note, duration, volume, current_pin);
     
     return mcp_success(result_json);
@@ -188,7 +188,7 @@ mcp_result_t play_melody_handler(const char* params) {
     // TODO: Implement melody parsing and playback
     // For now, just return success with the melody string
     snprintf(result_json, sizeof(result_json),
-        "{\"melody\":\"%s\",\"volume\":%d,\"status\":\"not_implemented\"}",
+        "Melody playback not yet implemented. Would play: %s at volume %d%%",
         melody, volume);
     
     return mcp_success(result_json);
@@ -207,7 +207,7 @@ mcp_result_t stop_music_handler(const char* params) {
     }
     
     snprintf(result_json, sizeof(result_json),
-        "{\"status\":\"stopped\",\"pin\":%d}", current_pin);
+        "Music playback stopped on GPIO pin %d", current_pin);
     
     return mcp_success(result_json);
 }
@@ -231,7 +231,7 @@ mcp_result_t set_volume_handler(const char* params) {
     current_volume = volume;
     
     snprintf(result_json, sizeof(result_json),
-        "{\"volume\":%d}", current_volume);
+        "Volume set to %d%%", current_volume);
     
     return mcp_success(result_json);
 }
@@ -308,21 +308,25 @@ static mcp_tool_t music_tools[] = {
     {
         .name = "play_note",
         .description = "Play a single musical note with optional duration and volume",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"note\":{\"type\":\"string\",\"description\":\"Musical note (e.g. 'C4', 'A#5', 'Bb6')\"},\"duration\":{\"type\":\"integer\",\"description\":\"Duration in milliseconds (1-10000)\",\"minimum\":1,\"maximum\":10000},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"note\"]}",
         .handler = play_note_handler
     },
     {
         .name = "play_melody", 
         .description = "Play a sequence of notes as a melody",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"melody\":{\"type\":\"string\",\"description\":\"Comma-separated musical notes (e.g. 'C4,D4,E4,F4')\"},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"melody\"]}",
         .handler = play_melody_handler
     },
     {
         .name = "stop_music",
         .description = "Stop current music playback",
+        .input_schema = "{\"type\":\"object\",\"properties\":{}}",
         .handler = stop_music_handler
     },
     {
         .name = "set_volume",
         .description = "Set playback volume (0-100)",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"volume\"]}",
         .handler = set_volume_handler
     }
 };

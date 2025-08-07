@@ -12,6 +12,7 @@
 #define MCP_MAX_DESCRIPTION 256
 #define MCP_MAX_PARAMS 512
 #define MCP_MAX_RESPONSE 1024
+#define MCP_MAX_INPUT_SCHEMA 512
 
 // MCP Result structure
 typedef struct {
@@ -27,6 +28,7 @@ typedef mcp_result_t (*mcp_tool_handler_t)(const char* params);
 typedef struct {
     char name[MCP_MAX_TOOL_NAME];
     char description[MCP_MAX_DESCRIPTION];
+    char input_schema[MCP_MAX_INPUT_SCHEMA];
     mcp_tool_handler_t handler;
 } mcp_tool_t;
 

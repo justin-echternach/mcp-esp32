@@ -174,28 +174,32 @@ void _start() {
     }
     log_info("_start", "mcp_server_init completed");
     
-    // Register tools
+    // Register tools with proper JSON schemas
     log_info("_start", "About to create tools array");
     mcp_tool_t tools[4];
     
     // Initialize tool 0: control_led
     strcpy(tools[0].name, "control_led");
-    strcpy(tools[0].description, "Control LED state on specified GPIO pin. Parameters: pin (number), state (0|1)");
+    strcpy(tools[0].description, "Control LED state on specified GPIO pin");
+    strcpy(tools[0].input_schema, "{\"type\":\"object\",\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"},\"state\":{\"type\":\"integer\",\"description\":\"LED state (0=OFF, 1=ON)\"}},\"required\":[\"pin\",\"state\"]}");
     tools[0].handler = control_led_handler;
     
     // Initialize tool 1: get_led_status
     strcpy(tools[1].name, "get_led_status");
-    strcpy(tools[1].description, "Get current LED state from GPIO pin. Parameters: pin (number)");
+    strcpy(tools[1].description, "Get current LED state from GPIO pin");
+    strcpy(tools[1].input_schema, "{\"type\":\"object\",\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"}},\"required\":[\"pin\"]}");
     tools[1].handler = get_led_status_handler;
     
     // Initialize tool 2: toggle_led
     strcpy(tools[2].name, "toggle_led");
-    strcpy(tools[2].description, "Toggle LED state on specified GPIO pin. Parameters: pin (number)");
+    strcpy(tools[2].description, "Toggle LED state on specified GPIO pin");
+    strcpy(tools[2].input_schema, "{\"type\":\"object\",\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"}},\"required\":[\"pin\"]}");
     tools[2].handler = toggle_led_handler;
     
     // Initialize tool 3: get_system_info
     strcpy(tools[3].name, "get_system_info");
-    strcpy(tools[3].description, "Get ESP32 system information (heap, uptime, etc). No parameters");
+    strcpy(tools[3].description, "Get ESP32 system information (heap, uptime, etc)");
+    strcpy(tools[3].input_schema, "{\"type\":\"object\",\"properties\":{}}");
     tools[3].handler = get_system_info_handler;
     
     log_info("_start", "Tools array created");

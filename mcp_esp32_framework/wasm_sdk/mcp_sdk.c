@@ -291,45 +291,15 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     for (int i = 0; i < g_tool_count; i++) {
         char tool_json[1024];  // Increased size for full schemas
         
-        // Generate proper MCP tool schema based on tool name
-        if (wasm_strcmp(g_tools[i].name, "control_led") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"control_led\",\"title\":\"LED Control\","
-                "\"description\":\"%s\","
-                "\"inputSchema\":{\"type\":\"object\","
-                "\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"},"
-                "\"state\":{\"type\":\"integer\",\"description\":\"LED state (0=OFF, 1=ON)\"}},"
-                "\"required\":[\"pin\",\"state\"]}}",
-                i > 0 ? "," : "", g_tools[i].description);
-        } else if (wasm_strcmp(g_tools[i].name, "get_led_status") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"get_led_status\",\"title\":\"LED Status Reader\","
-                "\"description\":\"%s\","
-                "\"inputSchema\":{\"type\":\"object\","
-                "\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"}},"
-                "\"required\":[\"pin\"]}}",
-                i > 0 ? "," : "", g_tools[i].description);
-        } else if (wasm_strcmp(g_tools[i].name, "toggle_led") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"toggle_led\",\"title\":\"LED Toggle\","
-                "\"description\":\"%s\","
-                "\"inputSchema\":{\"type\":\"object\","
-                "\"properties\":{\"pin\":{\"type\":\"integer\",\"description\":\"GPIO pin number (0-39)\"}},"
-                "\"required\":[\"pin\"]}}",
-                i > 0 ? "," : "", g_tools[i].description);
-        } else if (wasm_strcmp(g_tools[i].name, "get_system_info") == 0) {
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"get_system_info\",\"title\":\"System Information\","
-                "\"description\":\"%s\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-                i > 0 ? "," : "", g_tools[i].description);
-        } else {
-            // Fallback for unknown tools
-            snprintf(tool_json, sizeof(tool_json),
-                "%s{\"name\":\"%s\",\"title\":\"%s\",\"description\":\"%s\","
-                "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}}",
-                i > 0 ? "," : "", g_tools[i].name, g_tools[i].name, g_tools[i].description);
-        }
+        // Use the input_schema from the tool registration - no more hardcoding!
+        snprintf(tool_json, sizeof(tool_json),
+            "%s{\"name\":\"%s\",\"title\":\"%s\",\"description\":\"%s\","
+            "\"inputSchema\":%s}",
+            i > 0 ? "," : "", 
+            g_tools[i].name, 
+            g_tools[i].name, 
+            g_tools[i].description,
+            g_tools[i].input_schema);
         
         // Check if we have space before adding
         if (strlen(response) + strlen(tool_json) + 3 < max_len) {
