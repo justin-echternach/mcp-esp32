@@ -5,22 +5,7 @@
 #define NULL ((void*)0)
 #endif
 
-// Host-provided string functions (don't use standard library)
-// Use standard signatures to avoid compiler warnings
-extern int wasm_strcmp(const char* s1, const char* s2);
-extern unsigned long strlen(const char* s);
-extern char* strcat(char* dest, const char* src);
-extern char* strcpy(char* dest, const char* src);
-extern char* wasm_strncpy(char* dest, const char* src, unsigned long n);
-extern char* strstr(const char* haystack, const char* needle);
-extern int strncmp(const char* s1, const char* s2, unsigned long n);
 
-// Host-provided memory allocation functions
-extern void* malloc(unsigned long size);
-extern void free(void* ptr);
-
-// Host-provided formatting function
-extern int snprintf(char* buffer, unsigned long size, const char* format, ...);
 
 // SDK Implementation for MCP WASM Modules
 
@@ -234,6 +219,17 @@ static int32_t handle_initialize(const char* params, char* response, int32_t max
     
     g_mcp_state = MCP_STATE_INITIALIZING;
     log_info("MCP", "handle_initialize: State set to initializing");
+    
+    // Generate session ID and set response header
+    char session_id[64];
+    mcp_generate_session_id(session_id, sizeof(session_id));
+    
+    if (mcp_set_session_header(session_id) != 0) {
+        log_error("MCP", "Failed to set session header");
+        return create_jsonrpc_error(-32000, "Failed to set session header", response, max_len);
+    }
+    
+    log_info("MCP", "Session ID generated and header set");
     
     // Parse client info from params if needed (protocol version, etc.)
     // For now, just accept any initialize request
@@ -599,4 +595,33 @@ static int atoi(const char* str) {
     }
     
     return sign * result;
+}
+
+// ========== Session and Header Management Helpers ==========
+
+// Generate a simple session ID (UUID-like format)
+void mcp_generate_session_id(char* buffer, int32_t size) {
+    if (!buffer || size < 37) return;
+    
+    // Use system tick as a simple pseudo-random source
+    uint32_t tick = get_tick_count();
+    uint32_t heap = get_free_heap();
+    uint32_t uptime = get_uptime_ms();
+    
+    // Create a UUID-like format (not truly random, but unique enough for testing)
+    snprintf(buffer, size, 
+             "%08x-%04x-%04x-%04x-%08x%04x",
+             tick,
+             (uint16_t)(heap & 0xFFFF),
+             (uint16_t)((heap >> 16) & 0xFFFF),
+             (uint16_t)(uptime & 0xFFFF),
+             uptime,
+             (uint16_t)((tick >> 16) & 0xFFFF));
+}
+
+// Set MCP-Session-Id header in response
+int32_t mcp_set_session_header(const char* session_id) {
+    if (!session_id) return -1;
+    
+    return set_response_header("Mcp-Session-Id", session_id);
 }

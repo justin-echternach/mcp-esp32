@@ -33,6 +33,24 @@ typedef struct {
 // === Host Function Imports ===
 // These functions are provided by the ESP32 host
 
+// Host-provided string functions (don't use standard library)
+// Use standard signatures to avoid compiler warnings
+extern int wasm_strcmp(const char* s1, const char* s2);
+extern unsigned long strlen(const char* s);
+extern char* strcat(char* dest, const char* src);
+extern char* strcpy(char* dest, const char* src);
+extern char* wasm_strncpy(char* dest, const char* src, unsigned long n);
+extern char* strstr(const char* haystack, const char* needle);
+extern int strncmp(const char* s1, const char* s2, unsigned long n);
+
+
+// Host-provided memory allocation functions
+extern void* malloc(unsigned long size);
+extern void free(void* ptr);
+
+// Host-provided formatting function
+extern int snprintf(char* buffer, unsigned long size, const char* format, ...);
+
 // GPIO Control
 extern int32_t gpio_set_level(int32_t pin, int32_t level);
 extern int32_t gpio_get_level(int32_t pin);
@@ -58,6 +76,16 @@ extern int32_t log_info(const char* tag, const char* message);
 extern int32_t log_info2(uint32_t str_offset);
 extern int32_t log_info3(char *str, uint32_t len);
 extern int32_t log_error(const char* tag, const char* message);
+
+// HTTP Header Management (using buffer+length pattern)
+extern int32_t set_response_header(const char* name, const char* value);
+extern int32_t get_request_header(const char* name, char* buffer, int32_t buffer_size);
+extern int32_t remove_response_header(const char* name);
+extern int32_t list_request_headers(char* buffer, int32_t buffer_size);
+
+// Session and header management helpers
+void mcp_generate_session_id(char* buffer, int32_t size);
+int32_t mcp_set_session_header(const char* session_id);
 
 // === MCP SDK Functions ===
 // These functions are provided by the SDK
