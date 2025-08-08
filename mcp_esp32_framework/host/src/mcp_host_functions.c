@@ -200,7 +200,7 @@ int32_t mcp_native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* 
     return memcmp(s1, s2, n);
 }
 
-int32_t mcp_native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, unsigned long n) {
+int32_t mcp_native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, int32_t n) {
     // Using automatic string conversion ($$) - no validation needed
     return strncmp(s1, s2, n);
 }
@@ -261,7 +261,7 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env) {
 
 // ========== GPIO Functions (ESP32-specific) ==========
 
-static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
+int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
 {
     // Check if pin is protected
     if (pin >= 0 && pin < 40) {
@@ -281,7 +281,7 @@ static int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int3
     return (result == ESP_OK) ? 0 : -1;
 }
 
-static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
+int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
 {
     if (pin < 0 || pin >= 40) {
         return -1; // Invalid pin
@@ -290,7 +290,7 @@ static int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
     return gpio_get_level((gpio_num_t)pin);
 }
 
-static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
+int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
 {
     // Check if pin is protected
     if (pin >= 0 && pin < 40) {
@@ -318,7 +318,7 @@ static int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, 
     return (result == ESP_OK) ? 0 : -1;
 }
 
-static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
+int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
 {
     for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++) {
         if (g_mcp_config.gpio_protection.protected_pins[i] == pin) {
@@ -339,7 +339,7 @@ static int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pi
 static bool pwm_initialized = false;
 static int32_t pwm_current_pin = -1;
 
-static int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
+int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
 {
     // Validate parameters
     if (pin < 0 || pin >= 40) {
@@ -402,7 +402,7 @@ static int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t fr
     return 0;
 }
 
-static int32_t native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent)
+int32_t native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent)
 {
     if (!pwm_initialized || pwm_current_pin != pin) {
         ESP_LOGE(TAG, "PWM: Not initialized for pin %d", pin);
@@ -433,7 +433,7 @@ static int32_t native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_
     return 0;
 }
 
-static int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin)
+int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin)
 {
     if (!pwm_initialized || pwm_current_pin != pin) {
         ESP_LOGW(TAG, "PWM: Stop called but not initialized for pin %d", pin);
@@ -460,7 +460,7 @@ static int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin)
     return 0;
 }
 
-static int32_t native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
+int32_t native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency)
 {
     if (!pwm_initialized || pwm_current_pin != pin) {
         ESP_LOGE(TAG, "PWM: Not initialized for pin %d", pin);
@@ -493,7 +493,7 @@ void mcp_get_wamr_allocators(void** malloc_func, void** realloc_func, void** fre
 
 // ========== SSE Event Functions (MCP Protocol) ==========
 
-static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
+int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data)
 {
     if (!event_type || !data) {
         ESP_LOGE(TAG, "SSE_SEND_EVENT: Invalid parameters - event_type=%p, data=%p", event_type, data);
@@ -517,7 +517,7 @@ static int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event
     }
 }
 
-static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
+int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result)
 {
     if (!tool_name || !result) {
         ESP_LOGE(TAG, "SSE_SEND_TOOL_RESULT: Invalid parameters - tool_name=%p, result=%p", tool_name, result);
@@ -552,7 +552,7 @@ static int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char*
 
 // ========== JSON-RPC Protocol Functions (MCP Framework) ==========
 
-static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str, 
+int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str, 
                                          char* method_out, char* params_out, int32_t max_len)
 {
     ESP_LOGD(TAG, "JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json_str, method_out, params_out, max_len);
@@ -620,7 +620,7 @@ static int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* j
     return 0;
 }
 
-static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
+int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len)
 {
     // Using buffer + length signature ($*~) - safer parameter handling
     if (!response || max_len <= 0) {
@@ -636,7 +636,7 @@ static int32_t native_json_create_response(wasm_exec_env_t exec_env, const char*
     return len < max_len ? 0 : -2; // Buffer overflow
 }
 
-static int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
+int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len)
 {
     // Using buffer + length signature (i$*~) - safer parameter handling
     if (!response || max_len <= 0) {

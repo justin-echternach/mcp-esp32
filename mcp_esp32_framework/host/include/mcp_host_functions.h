@@ -10,6 +10,10 @@ extern "C" {
 
 // ========== Core Host Functions for WASM Modules ==========
 
+int32_t mcp_native_atoi(wasm_exec_env_t exec_env, const char* str);
+int32_t mcp_native_memcmp(wasm_exec_env_t exec_env, const void* s1, const void* s2, int32_t n);
+int32_t mcp_native_strncmp(wasm_exec_env_t exec_env, const char* s1, const char* s2, int32_t n);
+
 // ========== Memory Management Functions ==========
 
 /**
@@ -152,6 +156,20 @@ int32_t mcp_native_get_uptime_ms(wasm_exec_env_t exec_env);
  */
 int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
 
+// ========== GPIO Control Functions ==========
+/**
+ * @brief Set GPIO pin level
+ * 
+ * @param exec_env WASM execution environment
+ * @param pin GPIO pin number (0-39)
+ * @param level Level to set (0 or 1)
+ * @return 0 on success, -1 on error
+ */
+int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level);
+int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin);
+int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction);
+int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin);
+
 // ========== PWM Control Functions (LEDC-based) ==========
 
 /**
@@ -162,7 +180,7 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
  * @param frequency PWM frequency in Hz (1-40000)
  * @return 0 on success, negative on error
  */
-int32_t mcp_native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
+int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
 
 /**
  * @brief Set PWM duty cycle percentage
@@ -172,7 +190,7 @@ int32_t mcp_native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequ
  * @param duty_percent Duty cycle percentage (0-100)
  * @return 0 on success, negative on error
  */
-int32_t mcp_native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent);
+int32_t native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t duty_percent);
 
 /**
  * @brief Stop PWM output on specified pin
@@ -181,7 +199,7 @@ int32_t mcp_native_pwm_set_duty(wasm_exec_env_t exec_env, int32_t pin, int32_t d
  * @param pin GPIO pin number
  * @return 0 on success, negative on error
  */
-int32_t mcp_native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin);
+int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin);
 
 /**
  * @brief Update PWM frequency without reinitializing
@@ -191,7 +209,7 @@ int32_t mcp_native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin);
  * @param frequency New PWM frequency in Hz (1-40000)
  * @return 0 on success, negative on error
  */
-int32_t mcp_native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
+int32_t native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
 
 // ========== WAMR Runtime Memory Allocators (ESP32-specific) ==========
 
@@ -248,6 +266,13 @@ int32_t mcp_native_remove_response_header(wasm_exec_env_t exec_env, const char* 
  * @return int32_t Length of header list or -1 on error
  */
 int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, int32_t buffer_size);
+
+
+int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char* event_type, const char* data);
+int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char* tool_name, const char* result);
+int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str, char* method_out, char* params_out, int32_t max_len);
+int32_t native_json_create_response(wasm_exec_env_t exec_env, const char* result, char* response, int32_t max_len);
+int32_t native_json_create_error(wasm_exec_env_t exec_env, int32_t code, const char* message, char* response, int32_t max_len);
 
 // ========== Request Context Management (Internal) ==========
 
