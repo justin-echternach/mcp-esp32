@@ -548,6 +548,7 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     strncpy(module->route, route, sizeof(module->route) - 1);
     strncpy(module->wasm_file, wasm_filename, sizeof(module->wasm_file) - 1);
     module->loaded = false;
+    pthread_mutex_init(&module->module_mutex, NULL);
     
     // Load WASM file
     char wasm_path[128];
@@ -630,37 +631,37 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
 #endif
     
     // DEBUGGING: Inspect WASM file buffer for target string BEFORE wasm_runtime_load
-    const char* target_string = "mcp_handle_request:About to check tools/list";
-    size_t target_len = strlen(target_string);
-    bool found_before = false;
-    size_t found_offset_before = 0;
+    // const char* target_string = "mcp_handle_request:About to check tools/list";
+    // size_t target_len = strlen(target_string);
+    // bool found_before = false;
+    // size_t found_offset_before = 0;
     
-    ESP_LOGI(TAG, "🔍 BEFORE wasm_runtime_load - Searching for string: '%s'", target_string);
-    ESP_LOGI(TAG, "🔍 File size: %ld bytes, searching for %zu byte string", file_size, target_len);
+    // ESP_LOGI(TAG, "🔍 BEFORE wasm_runtime_load - Searching for string: '%s'", target_string);
+    // ESP_LOGI(TAG, "🔍 File size: %ld bytes, searching for %zu byte string", file_size, target_len);
     
-    for (size_t i = 0; i <= file_size - target_len; i++) {
-        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-            found_before = true;
-            found_offset_before = i;
-            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer BEFORE load", i, i);
+    // for (size_t i = 0; i <= file_size - target_len; i++) {
+    //     if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
+    //         found_before = true;
+    //         found_offset_before = i;
+    //         ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer BEFORE load", i, i);
             
-            // Show surrounding bytes
-            ESP_LOGI(TAG, "🔍 Surrounding bytes at offset 0x%zx:", i);
-            size_t start = (i >= 16) ? i - 16 : 0;
-            size_t end = (i + target_len + 16 < file_size) ? i + target_len + 16 : file_size;
+    //         // Show surrounding bytes
+    //         ESP_LOGI(TAG, "🔍 Surrounding bytes at offset 0x%zx:", i);
+    //         size_t start = (i >= 16) ? i - 16 : 0;
+    //         size_t end = (i + target_len + 16 < file_size) ? i + target_len + 16 : file_size;
             
-            for (size_t j = start; j < end; j++) {
-                if (j == i) ESP_LOGI(TAG, "🔍   [TARGET START] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-                else if (j == i + target_len) ESP_LOGI(TAG, "🔍   [TARGET END] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-                else ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-            }
-            break;
-        }
-    }
+    //         for (size_t j = start; j < end; j++) {
+    //             if (j == i) ESP_LOGI(TAG, "🔍   [TARGET START] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+    //             else if (j == i + target_len) ESP_LOGI(TAG, "🔍   [TARGET END] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+    //             else ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+    //         }
+    //         break;
+    //     }
+    // }
     
-    if (!found_before) {
-        ESP_LOGW(TAG, "🔍 String NOT found in file buffer before load");
-    }
+    // if (!found_before) {
+    //     ESP_LOGW(TAG, "🔍 String NOT found in file buffer before load");
+    // }
     
     // Load WASM module
     char error_buf[128];
@@ -669,35 +670,35 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     ESP_LOGI(TAG, "🔍 wasm_runtime_load returned: %p", module->wasm_module);
     
     // DEBUGGING: Inspect WASM file buffer for target string AFTER wasm_runtime_load
-    ESP_LOGI(TAG, "🔍 AFTER wasm_runtime_load - Searching for string: '%s'", target_string);
-    bool found_after = false;
-    size_t found_offset_after = 0;
+    // ESP_LOGI(TAG, "🔍 AFTER wasm_runtime_load - Searching for string: '%s'", target_string);
+    // bool found_after = false;
+    // size_t found_offset_after = 0;
     
-    for (size_t i = 0; i <= file_size - target_len; i++) {
-        if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-            found_after = true;
-            found_offset_after = i;
-            ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer AFTER load", i, i);
-            break;
-        }
-    }
+    // for (size_t i = 0; i <= file_size - target_len; i++) {
+    //     if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
+    //         found_after = true;
+    //         found_offset_after = i;
+    //         ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer AFTER load", i, i);
+    //         break;
+    //     }
+    // }
     
-    if (!found_after && found_before) {
-        ESP_LOGI(TAG, "🚨 STRING DISAPPEARED from file buffer after wasm_runtime_load!");
-        ESP_LOGI(TAG, "🚨 This confirms the issue: wasm_runtime_load modified the file buffer");
+    // if (!found_after && found_before) {
+    //     ESP_LOGI(TAG, "🚨 STRING DISAPPEARED from file buffer after wasm_runtime_load!");
+    //     ESP_LOGI(TAG, "🚨 This confirms the issue: wasm_runtime_load modified the file buffer");
         
-        // Check what's at the original location now
-        ESP_LOGI(TAG, "🔍 Checking what's at original offset 0x%zx now:", found_offset_before);
-        for (size_t j = found_offset_before; j < found_offset_before + target_len && j < file_size; j++) {
-            ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-        }
-    } else if (found_after && found_before && found_offset_after == found_offset_before) {
-        ESP_LOGI(TAG, "✅ String still present at same location after wasm_runtime_load");
-    } else if (found_after && found_before && found_offset_after != found_offset_before) {
-        ESP_LOGI(TAG, "🔄 String moved from 0x%zx to 0x%zx after wasm_runtime_load", found_offset_before, found_offset_after);
-    } else if (!found_before && !found_after) {
-        ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
-    }
+    //     // Check what's at the original location now
+    //     ESP_LOGI(TAG, "🔍 Checking what's at original offset 0x%zx now:", found_offset_before);
+    //     for (size_t j = found_offset_before; j < found_offset_before + target_len && j < file_size; j++) {
+    //         ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
+    //     }
+    // } else if (found_after && found_before && found_offset_after == found_offset_before) {
+    //     ESP_LOGI(TAG, "✅ String still present at same location after wasm_runtime_load");
+    // } else if (found_after && found_before && found_offset_after != found_offset_before) {
+    //     ESP_LOGI(TAG, "🔄 String moved from 0x%zx to 0x%zx after wasm_runtime_load", found_offset_before, found_offset_after);
+    // } else if (!found_before && !found_after) {
+    //     ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
+    // }
     
     free(wasm_file_buf);
     

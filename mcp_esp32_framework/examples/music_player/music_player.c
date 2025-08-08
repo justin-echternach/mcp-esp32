@@ -241,7 +241,8 @@ static float get_note_frequency(const char* note) {
     if (!note || !note_frequencies) return 0.0f;
     
     for (int i = 0; i < note_count; i++) {
-        if (wasm_strcmp(note, note_frequencies[i].note_name) == 0) {
+        //if (wasm_strcmp(note, note_frequencies[i].note_name) == 0) {
+        if (strcmp(note, note_frequencies[i].note_name) == 0) {
             return note_frequencies[i].frequency;
         }
     }
@@ -265,7 +266,8 @@ static int parse_note_duration(const char* note_with_duration, char* note_out, i
     int note_len = colon - note_with_duration;
     if (note_len >= MAX_NOTE_LENGTH) return -1;
     
-    wasm_strncpy(note_out, note_with_duration, note_len);
+    //wasm_strncpy(note_out, note_with_duration, note_len);
+    strncpy(note_out, note_with_duration, note_len);
     note_out[note_len] = '\0';
     
     // Parse duration

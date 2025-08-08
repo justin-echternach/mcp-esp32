@@ -38,6 +38,7 @@ typedef struct {
     wasm_module_inst_t wasm_module_inst;
     wasm_exec_env_t exec_env;
     bool loaded;
+    pthread_mutex_t module_mutex;
 } mcp_wasm_module_t;
 
 // MCP pthread pool configuration

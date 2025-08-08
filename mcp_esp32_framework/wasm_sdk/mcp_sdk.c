@@ -66,12 +66,12 @@ int32_t mcp_server_init(const char* server_name, const char* version) {
     }
     
     log_info("MCP", "mcp_server_init: About to copy server name to heap");
-    wasm_strncpy(g_server_name, server_name, 63);
+    strncpy(g_server_name, server_name, 63);
     g_server_name[63] = '\0';
     log_info("MCP", "mcp_server_init: Server name copied to heap");
     
     log_info("MCP", "mcp_server_init: About to copy version to heap");
-    wasm_strncpy(g_server_version, version, 15);
+    strncpy(g_server_version, version, 15);
     g_server_version[15] = '\0';
     log_info("MCP", "mcp_server_init: Version copied to heap");
     
@@ -164,19 +164,19 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     
     // Handle different MCP methods
     log_info("MCP", "mcp_handle_request: About to check initialize");
-    if (wasm_strcmp(method, "initialize") == 0) {
+    if (strcmp(method, "initialize") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialize");
         return handle_initialize(params, response, max_len);
     }
     
     log_info("MCP", "mcp_handle_request: About to check initialized");
-    if (wasm_strcmp(method, "notifications/initialized") == 0) {
+    if (strcmp(method, "notifications/initialized") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_initialized");
         return handle_initialized(response, max_len);
     }
     
     log_info("MCP", "mcp_handle_request:About to check tools/list");
-    if (wasm_strcmp(method, "tools/list") == 0) {
+    if (strcmp(method, "tools/list") == 0) {
         log_info("MCP", "mcp_handle_request:Matched tools/list, checking state");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             log_info("MCP", "mcp_handle_request:Server not initialized, creating error");
@@ -187,7 +187,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     }
     
     log_info("MCP", "mcp_handle_request:About to check tools/call");
-    if (wasm_strcmp(method, "tools/call") == 0) {
+    if (strcmp(method, "tools/call") == 0) {
         log_info("MCP", "mcp_handle_request: Calling handle_tools_call");
         if (g_mcp_state != MCP_STATE_INITIALIZED) {
             return create_jsonrpc_error(-32002, "Server not initialized", response, max_len);
@@ -196,14 +196,14 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     } 
     
     log_info("MCP", "mcp_handle_request: About to check prompts/list");
-    if (wasm_strcmp(method, "prompts/list") == 0) {
+    if (strcmp(method, "prompts/list") == 0) {
         log_info("MCP", "mcp_handle_request: Calling prompts/list handler");
         // Return empty prompts array - we don't implement prompts
         return create_jsonrpc_response("{\"prompts\":[]}", response, max_len);
     }
     
     log_info("MCP", "mcp_handle_request: About to check ping");
-    if (wasm_strcmp(method, "ping") == 0) {
+    if (strcmp(method, "ping") == 0) {
         log_info("MCP", "mcp_handle_request: Calling ping handler");
         return create_jsonrpc_response("{\"message\":\"pong\"}", response, max_len);
     }
@@ -365,7 +365,7 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
     
     // Find and call the tool
     for (int i = 0; i < g_tool_count; i++) {
-        if (wasm_strcmp(g_tools[i].name, tool_name) == 0) {
+        if (strcmp(g_tools[i].name, tool_name) == 0) {
             mcp_result_t result = g_tools[i].handler(tool_params);
             
             if (result.code == 0) {
@@ -397,7 +397,7 @@ mcp_result_t mcp_success(const char* data) {
     mcp_result_t result;
     result.code = 0;
     strcpy(result.message, "Success");
-    wasm_strncpy(result.data, data ? data : "{}", sizeof(result.data) - 1);
+    strncpy(result.data, data ? data : "{}", sizeof(result.data) - 1);
     return result;
 }
 
@@ -405,7 +405,7 @@ mcp_result_t mcp_success(const char* data) {
 mcp_result_t mcp_error(int32_t code, const char* message) {
     mcp_result_t result;
     result.code = code;
-    wasm_strncpy(result.message, message ? message : "Unknown error", sizeof(result.message) - 1);
+    strncpy(result.message, message ? message : "Unknown error", sizeof(result.message) - 1);
     strcpy(result.data, "null");
     return result;
 }

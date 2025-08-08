@@ -368,38 +368,38 @@ static int32_t native_get_tick(wasm_exec_env_t exec_env)
 
 
 // Your host function
-int32_t native_log_info2(wasm_exec_env_t exec_env, uint32_t str_offset) {
-    wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+// int32_t native_log_info2(wasm_exec_env_t exec_env, uint32_t str_offset) {
+//     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     
-    // Validate the string address first
-    if (!wasm_runtime_validate_app_str_addr(module_inst, str_offset)) {
-        printf("Invalid string address\n");
-        return -1;
-    }
+//     // Validate the string address first
+//     if (!wasm_runtime_validate_app_str_addr(module_inst, str_offset)) {
+//         printf("Invalid string address\n");
+//         return -1;
+//     }
     
-    // Convert to native address
-    char *str = wasm_runtime_addr_app_to_native(module_inst, str_offset);
-    if (str) {
-        printf("Log2: %s\n", str);
-        return 0;
-    }
-    return -1;
-}
+//     // Convert to native address
+//     char *str = wasm_runtime_addr_app_to_native(module_inst, str_offset);
+//     if (str) {
+//         printf("Log2: %s\n", str);
+//         return 0;
+//     }
+//     return -1;
+// }
 
 
 
-int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
-    // str is already converted, len is the buffer size
-    if (str && len > 0) {
-        // Ensure null termination
-        char temp_buf[len + 1];
-        memcpy(temp_buf, str, len);
-        temp_buf[len] = '\0';
-        printf("Log3: %s\n", temp_buf);
-        return 0;
-    }
-    return -1;
-}
+// int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
+//     // str is already converted, len is the buffer size
+//     if (str && len > 0) {
+//         // Ensure null termination
+//         char temp_buf[len + 1];
+//         memcpy(temp_buf, str, len);
+//         temp_buf[len] = '\0';
+//         printf("Log3: %s\n", temp_buf);
+//         return 0;
+//     }
+//     return -1;
+// }
 
 
 // String Functions (C library compatibility)
@@ -417,19 +417,19 @@ int32_t native_log_info3(wasm_exec_env_t exec_env, char *str, uint32_t len) {
 
 // Native symbol table - exports native functions to WASM
 // Application-specific native functions (framework functions are registered separately)
-static NativeSymbol app_native_symbols[] = {
-    // Application-specific LED control and timing
-    {"led_control", native_led_control, "(i)i", NULL},
-    {"get_tick", native_get_tick, "()i", NULL},
+// static NativeSymbol app_native_symbols[] = {
+//     // Application-specific LED control and timing
+//     {"led_control", native_led_control, "(i)i", NULL},
+//     {"get_tick", native_get_tick, "()i", NULL},
     
     
-    // Debug logging functions (temporary)
-    {"log_info2", native_log_info2, "(i)i", NULL},
-    {"log_info3", native_log_info3, "(*~)i", NULL},
+//     // Debug logging functions (temporary)
+//     //{"log_info2", native_log_info2, "(i)i", NULL},
+//     //{"log_info3", native_log_info3, "(*~)i", NULL},
     
-    // Note: strncmp and memcmp now provided by framework
-    // Note: Framework provides: gpio_*, sse_*, log_*, strlen, strcmp, strcpy, strcat, strncpy, strstr, memcpy, malloc, free
-};
+//     // Note: strncmp and memcmp now provided by framework
+//     // Note: Framework provides: gpio_*, sse_*, log_*, strlen, strcmp, strcpy, strcat, strncpy, strstr, memcpy, malloc, free
+// };
 
 
 
@@ -455,7 +455,8 @@ void iwasm_main(void *arg)
     // Mount SD card first
     if (!mcp_wasm_mount_sd_card()) {
         ESP_LOGE(TAG, "Failed to mount SD card, cannot load WASM from SD");
-        goto no_wasm_fallback;
+        return;
+        //goto no_wasm_fallback;
     }
     
     // Initialize MCP configuration system now that SD card is mounted
@@ -500,89 +501,91 @@ void iwasm_main(void *arg)
     ESP_LOGI(TAG, "Initializing WASM runtime with ESP32 allocator");
     if (!wasm_runtime_full_init(&init_args)) {
         ESP_LOGE(TAG, "WASM runtime full init failed.");
-        goto no_wasm_fallback;
+        return;
+        //goto no_wasm_fallback;
     }
     
     ESP_LOGI(TAG, "WASM runtime initialized successfully");
     
     // Register application-specific native functions
-    if (!wasm_runtime_register_natives("env", app_native_symbols, 
-                                       sizeof(app_native_symbols) / sizeof(NativeSymbol))) {
-        ESP_LOGW(TAG, "Failed to register app-specific native functions (continuing anyway)");
-    } else {
-        ESP_LOGI(TAG, "Registered %d app-specific native functions", 
-                 (int)(sizeof(app_native_symbols) / sizeof(NativeSymbol)));
-    }
+    // if (!wasm_runtime_register_natives("env", app_native_symbols, 
+    //                                    sizeof(app_native_symbols) / sizeof(NativeSymbol))) {
+    //     ESP_LOGW(TAG, "Failed to register app-specific native functions (continuing anyway)");
+    // } else {
+    //     ESP_LOGI(TAG, "Registered %d app-specific native functions", 
+    //              (int)(sizeof(app_native_symbols) / sizeof(NativeSymbol)));
+    // }
     
     // Initialize MCP pthread pool for concurrent request handling
     ESP_LOGI(TAG, "Initializing MCP pthread pool...");
     if (mcp_pthread_pool_init(g_mcp_config.system.max_wasm_modules) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize MCP pthread pool");
-        goto no_wasm_fallback;
+        return;
+        //goto no_wasm_fallback;
     }
     
     // Thread environment should be automatically handled in pthread context
     ESP_LOGI(TAG, "Running in pthread context - thread environment should be automatic");
 
-    ESP_LOGI(TAG, "Loading WASM module from SD card");
+    // ESP_LOGI(TAG, "Loading WASM module from SD card");
     
-    // Load WASM file from SD card instead of embedded header
-    // Try the 8.3 FAT32 short filename first
-    wasm_file_buf = mcp_wasm_load_from_sd("led.was", &wasm_file_buf_size);
-    if (!wasm_file_buf) {
-        // If that fails, try the long filename
-        ESP_LOGI(TAG, "Short filename failed, trying long filename...");
-        wasm_file_buf = mcp_wasm_load_from_sd("led_control.wasm", &wasm_file_buf_size);
-    }
-    if (!wasm_file_buf) {
-        ESP_LOGE(TAG, "Failed to load WASM from SD card");
-        goto fail1;
-    }
-    ESP_LOGI(TAG, "WASM module loaded from SD: %d bytes", wasm_file_buf_size);
+    // // Load WASM file from SD card instead of embedded header
+    // // Try the 8.3 FAT32 short filename first
+    // wasm_file_buf = mcp_wasm_load_from_sd("led.was", &wasm_file_buf_size);
+    // if (!wasm_file_buf) {
+    //     // If that fails, try the long filename
+    //     ESP_LOGI(TAG, "Short filename failed, trying long filename...");
+    //     wasm_file_buf = mcp_wasm_load_from_sd("led_control.wasm", &wasm_file_buf_size);
+    // }
+    // if (!wasm_file_buf) {
+    //     ESP_LOGE(TAG, "Failed to load WASM from SD card");
+    //     goto fail1;
+    // }
+    // ESP_LOGI(TAG, "WASM module loaded from SD: %d bytes", wasm_file_buf_size);
 
-    if (!(wasm_module = wasm_runtime_load(wasm_file_buf, wasm_file_buf_size,
-                                          error_buf, sizeof(error_buf)))) {
-        ESP_LOGE(TAG, "Error in wasm_runtime_load: %s", error_buf);
-        goto fail1;
-    }
+    // if (!(wasm_module = wasm_runtime_load(wasm_file_buf, wasm_file_buf_size,
+    //                                       error_buf, sizeof(error_buf)))) {
+    //     ESP_LOGE(TAG, "Error in wasm_runtime_load: %s", error_buf);
+    //     goto fail1;
+    // }
 
-    ESP_LOGI(TAG, "Instantiating WASM runtime");
-    ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
-    uint32_t stack_size = 4096;   // Stack size (from WASM compile)  
-    uint32_t heap_size = 8192;   // Reduced from 32KB to 8KB to match working LED WASM
+    // ESP_LOGI(TAG, "Instantiating WASM runtime");
+    // ESP_LOGI(TAG, "Free heap before instantiate: %ld bytes", esp_get_free_heap_size());
+    // uint32_t stack_size = 4096;   // Stack size (from WASM compile)  
+    // uint32_t heap_size = 8192;   // Reduced from 32KB to 8KB to match working LED WASM
     
-    if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
-                                                     stack_size,
-                                                     heap_size,
-                                                     error_buf, sizeof(error_buf)))) {
-        ESP_LOGE(TAG, "Error while instantiating: %s", error_buf);
-        goto fail2;
-    }
+    // if (!(wasm_module_inst = wasm_runtime_instantiate(wasm_module, 
+    //                                                  stack_size,
+    //                                                  heap_size,
+    //                                                  error_buf, sizeof(error_buf)))) {
+    //     ESP_LOGE(TAG, "Error while instantiating: %s", error_buf);
+    //     goto fail2;
+    // }
     
-    ESP_LOGI(TAG, "WASM module instantiated successfully");
-    ESP_LOGI(TAG, "Free heap after instantiate: %ld bytes", esp_get_free_heap_size());
+    // ESP_LOGI(TAG, "WASM module instantiated successfully");
+    // ESP_LOGI(TAG, "Free heap after instantiate: %ld bytes", esp_get_free_heap_size());
 
-    // Try creating exec env now that we have pthread context
-    ESP_LOGI(TAG, "Creating execution environment with pthread context");
-    exec_env = mcp_wasm_create_exec_env(wasm_module_inst);
+    // // Try creating exec env now that we have pthread context
+    // ESP_LOGI(TAG, "Creating execution environment with pthread context");
+    // exec_env = mcp_wasm_create_exec_env(wasm_module_inst);
     
-    if (!exec_env) {
-        ESP_LOGW(TAG, "Failed to create execution environment even with pthread context");
-        ESP_LOGW(TAG, "Will continue with WASM loaded but cannot execute functions");
-        ESP_LOGW(TAG, "Free heap: %ld bytes", esp_get_free_heap_size());
-        // Continue execution but WASM functions won't work
-    } else {
-        ESP_LOGI(TAG, "✅ Execution environment created successfully with pthread context");
-    }
+    // if (!exec_env) {
+    //     ESP_LOGW(TAG, "Failed to create execution environment even with pthread context");
+    //     ESP_LOGW(TAG, "Will continue with WASM loaded but cannot execute functions");
+    //     ESP_LOGW(TAG, "Free heap: %ld bytes", esp_get_free_heap_size());
+    //     // Continue execution but WASM functions won't work
+    // } else {
+    //     ESP_LOGI(TAG, "✅ Execution environment created successfully with pthread context");
+    // }
 
-    ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
-    wasm_available = true;
+    // ESP_LOGI(TAG, "✅ WASM runtime initialized successfully!");
+    // wasm_available = true;
     
-    // Set global variables for HTTP API access
-    g_wasm_module = wasm_module;
-    g_wasm_module_inst = wasm_module_inst;
-    g_exec_env = exec_env;
-    g_wasm_available = wasm_available;
+    // // Set global variables for HTTP API access
+    // g_wasm_module = wasm_module;
+    // g_wasm_module_inst = wasm_module_inst;
+    // g_exec_env = exec_env;
+    // g_wasm_available = wasm_available;
     
     // Debug: Dump LED WASM exports for comparison
     // mcp_wasm_dump_exports(wasm_module, "led.was");
@@ -614,106 +617,106 @@ void iwasm_main(void *arg)
     //     }
     // }
 
-    goto main_loop;
+//     goto main_loop;
 
-no_wasm_fallback:
-    ESP_LOGW(TAG, "WASM initialization failed, falling back to direct GPIO control");
-    wasm_available = false;
+// no_wasm_fallback:
+//     ESP_LOGW(TAG, "WASM initialization failed, falling back to direct GPIO control");
+//     wasm_available = false;
     
-    // Initialize MCP configuration with defaults (SD card failed)
-    if (!init_mcp_config()) {
-        ESP_LOGE(TAG, "Failed to initialize MCP configuration");
-    } else {
-        ESP_LOGI(TAG, "MCP configuration system initialized (defaults only)");
-    }
-    goto main_loop;
+//     // Initialize MCP configuration with defaults (SD card failed)
+//     if (!init_mcp_config()) {
+//         ESP_LOGE(TAG, "Failed to initialize MCP configuration");
+//     } else {
+//         ESP_LOGI(TAG, "MCP configuration system initialized (defaults only)");
+//     }
+//     goto main_loop;
 
-main_loop:    
-    // LED blink loop with WASM integration or fallback
-    bool led_state = false;
-    int count = 0;
+// main_loop:    
+//     // LED blink loop with WASM integration or fallback
+//     bool led_state = false;
+//     int count = 0;
     
-    if (g_wasm_available) {
-        ESP_LOGI(TAG, "🔄 Starting WASM-controlled LED blink loop");
-    } else {
-        ESP_LOGI(TAG, "🔄 Starting direct GPIO LED blink loop");
-    }
+//     if (g_wasm_available) {
+//         ESP_LOGI(TAG, "🔄 Starting WASM-controlled LED blink loop");
+//     } else {
+//         ESP_LOGI(TAG, "🔄 Starting direct GPIO LED blink loop");
+//     }
     
-    while (1) {
-        // Check if LED blinking is enabled
-        if (!g_led_blink_enabled) {
-            vTaskDelay(1000 / portTICK_PERIOD_MS);  // Sleep for 1 second when disabled
-            continue;
-        }
+//     while (1) {
+//         // Check if LED blinking is enabled
+//         if (!g_led_blink_enabled) {
+//             vTaskDelay(1000 / portTICK_PERIOD_MS);  // Sleep for 1 second when disabled
+//             continue;
+//         }
         
-        led_state = !led_state;
+//         led_state = !led_state;
         
-        if (g_wasm_available && g_exec_env && g_wasm_module_inst) {
-            // Use WASM to control LED directly!
-            ESP_LOGD(TAG, "Using WASM LED control functions");
+//         if (g_wasm_available && g_exec_env && g_wasm_module_inst) {
+//             // Use WASM to control LED directly!
+//             ESP_LOGD(TAG, "Using WASM LED control functions");
             
-            // Try to call the WASM LED toggle function
-            wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
-            if (led_toggle_func) {
-                uint32_t argv[1] = {count};
-                if (mcp_wasm_safe_call(g_exec_env, led_toggle_func, 1, argv)) {
-                    int led_result = argv[0];
-                    ESP_LOGI(TAG, "🟢 WASM LED toggle executed! LED %s (count: %d)", 
-                            led_result ? "ON" : "OFF", count++);
-                } else {
-                    ESP_LOGE(TAG, "🔴 WASM LED toggle failed, using fallback");
-                    gpio_set_level(LED_GPIO, led_state);
-                    count++;
-                }
-            } else {
-                // Fallback to basic LED on/off functions
-                wasm_function_inst_t led_func = led_state ? 
-                    wasm_runtime_lookup_function(g_wasm_module_inst, "led_on") :
-                    wasm_runtime_lookup_function(g_wasm_module_inst, "led_off");
+//             // Try to call the WASM LED toggle function
+//             wasm_function_inst_t led_toggle_func = wasm_runtime_lookup_function(g_wasm_module_inst, "led_toggle");
+//             if (led_toggle_func) {
+//                 uint32_t argv[1] = {count};
+//                 if (mcp_wasm_safe_call(g_exec_env, led_toggle_func, 1, argv)) {
+//                     int led_result = argv[0];
+//                     ESP_LOGI(TAG, "🟢 WASM LED toggle executed! LED %s (count: %d)", 
+//                             led_result ? "ON" : "OFF", count++);
+//                 } else {
+//                     ESP_LOGE(TAG, "🔴 WASM LED toggle failed, using fallback");
+//                     gpio_set_level(LED_GPIO, led_state);
+//                     count++;
+//                 }
+//             } else {
+//                 // Fallback to basic LED on/off functions
+//                 wasm_function_inst_t led_func = led_state ? 
+//                     wasm_runtime_lookup_function(g_wasm_module_inst, "led_on") :
+//                     wasm_runtime_lookup_function(g_wasm_module_inst, "led_off");
                     
-                if (led_func) {
-                    if (mcp_wasm_safe_call(g_exec_env, led_func, 0, NULL)) {
-                        ESP_LOGI(TAG, "🟢 WASM LED %s executed (count: %d)", 
-                                led_state ? "ON" : "OFF", count++);
-                    } else {
-                        ESP_LOGE(TAG, "🔴 WASM LED function failed, using fallback");
-                        gpio_set_level(LED_GPIO, led_state);
-                        count++;
-                    }
-                } else {
-                    count++;
-                    ESP_LOGI(TAG, "🔴 No WASM LED functions found, direct LED %s (count: %d)", 
-                            led_state ? "ON" : "OFF", count);
-                    gpio_set_level(LED_GPIO, led_state);
-                }
-            }
-        } else if (wasm_available) {
-            ESP_LOGI(TAG, "❌ WASM available but no exec env, using direct GPIO");
-            count++;  
-            ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), exec env failed, direct LED %s (count: %d)", 
-                    wasm_file_buf_size, led_state ? "ON" : "OFF", count);
-            gpio_set_level(LED_GPIO, led_state);
-        } else {
-            // Direct GPIO control fallback
-            gpio_set_level(LED_GPIO, led_state);
-            ESP_LOGI(TAG, "🔴 Fallback LED %s (count: %d)", led_state ? "ON" : "OFF", count++);
-        }
+//                 if (led_func) {
+//                     if (mcp_wasm_safe_call(g_exec_env, led_func, 0, NULL)) {
+//                         ESP_LOGI(TAG, "🟢 WASM LED %s executed (count: %d)", 
+//                                 led_state ? "ON" : "OFF", count++);
+//                     } else {
+//                         ESP_LOGE(TAG, "🔴 WASM LED function failed, using fallback");
+//                         gpio_set_level(LED_GPIO, led_state);
+//                         count++;
+//                     }
+//                 } else {
+//                     count++;
+//                     ESP_LOGI(TAG, "🔴 No WASM LED functions found, direct LED %s (count: %d)", 
+//                             led_state ? "ON" : "OFF", count);
+//                     gpio_set_level(LED_GPIO, led_state);
+//                 }
+//             }
+//         } else if (wasm_available) {
+//             ESP_LOGI(TAG, "❌ WASM available but no exec env, using direct GPIO");
+//             count++;  
+//             ESP_LOGI(TAG, "🟡 WASM loaded (%d bytes), exec env failed, direct LED %s (count: %d)", 
+//                     wasm_file_buf_size, led_state ? "ON" : "OFF", count);
+//             gpio_set_level(LED_GPIO, led_state);
+//         } else {
+//             // Direct GPIO control fallback
+//             gpio_set_level(LED_GPIO, led_state);
+//             ESP_LOGI(TAG, "🔴 Fallback LED %s (count: %d)", led_state ? "ON" : "OFF", count++);
+//         }
         
-        vTaskDelay(BLINK_PERIOD_MS / portTICK_PERIOD_MS);
-    }
+//         vTaskDelay(BLINK_PERIOD_MS / portTICK_PERIOD_MS);
+//     }
 
-    // Cleanup (only reached if loop is broken)
-    ESP_LOGI(TAG, "Deinitializing WASM runtime");
-    if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
-    if (wasm_module_inst) wasm_runtime_deinstantiate(wasm_module_inst);
-    wasm_runtime_destroy_thread_env();
+//     // Cleanup (only reached if loop is broken)
+//     ESP_LOGI(TAG, "Deinitializing WASM runtime");
+//     if (exec_env) wasm_runtime_destroy_exec_env(exec_env);
+//     if (wasm_module_inst) wasm_runtime_deinstantiate(wasm_module_inst);
+//     wasm_runtime_destroy_thread_env();
     
-fail2:
-    if (wasm_module) wasm_runtime_unload(wasm_module);
+// fail2:
+//     if (wasm_module) wasm_runtime_unload(wasm_module);
     
-fail1:
-    if (wasm_file_buf) free(wasm_file_buf);
-    wasm_runtime_destroy();
+// fail1:
+//     if (wasm_file_buf) free(wasm_file_buf);
+//     wasm_runtime_destroy();
 }
 
 // Pthread entry point for WAMR

@@ -204,6 +204,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     
     // Look for MCP request handler function with retry mechanism for timing issues
     ESP_LOGI(TAG, "🔍 DEBUG: About to lookup function in pthread context");
+    pthread_mutex_lock(&module->module_mutex);
     wasm_function_inst_t handle_request_func = NULL;
     int retry_count = 0;
     const int max_retries = 5;
@@ -227,6 +228,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
         snprintf(req->response, sizeof(req->response),
                  "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");
         mcp_session_clear_current();
+        pthread_mutex_unlock(&module->module_mutex);
         return ESP_FAIL;
     }
     
@@ -277,7 +279,7 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
     
     // Clear request context after WASM execution
-    // mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
+    mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
     
     ESP_LOGI(TAG, "🔍 DEBUG: WASM call result: %s", call_success ? "SUCCESS" : "FAILED");
     
@@ -291,7 +293,8 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     // Ensure we don't overflow the response buffer
     strncpy(req->response, response_native_ptr, sizeof(req->response) - 1);
     req->response[sizeof(req->response) - 1] = '\0';
-    
+
+    pthread_mutex_unlock(&module->module_mutex);
     // No need to free WASM memory - using fixed offsets
     
     if (!call_success) {

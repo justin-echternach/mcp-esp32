@@ -136,8 +136,10 @@ int32_t mcp_native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
     strcat(dest, src);
     
     // Convert host pointer back to WASM address
-    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    return wasm_addr;
+    //uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    //return wasm_addr;
+    //return (int32_t)dest;
+    return 0;
 }
 
 int32_t mcp_native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n) {
@@ -556,6 +558,10 @@ int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str
                                          char* method_out, char* params_out, int32_t max_len)
 {
     ESP_LOGD(TAG, "JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json_str, method_out, params_out, max_len);
+     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+    
+    
     
     // Since we're using automatic conversion ($**i), the pointers are already native pointers
     // No validation needed - just direct access
@@ -568,6 +574,9 @@ int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char* json_str
         ESP_LOGE(TAG, "JSON_PARSE: json_find_string failed - method not found");
         return -2; // Method not found
     }
+
+    // Convert host pointer back to WASM address
+    //uint32_t method_out = wasm_runtime_addr_native_to_app(module_inst, method);
     
     ESP_LOGD(TAG, "JSON_PARSE: Successfully parsed method: '%s'", method_out);
     
@@ -874,22 +883,24 @@ int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, 
 
 NativeSymbol mcp_core_host_functions[] = {
     // Memory management
-    {"malloc", mcp_native_malloc, "(i)i", NULL},
-    {"free", mcp_native_free, "(i)", NULL},
+    //{"malloc", mcp_native_malloc, "(i)i", NULL},
+    //{"free", mcp_native_free, "(i)", NULL},
     
     // String functions - using automatic string conversion ($)
-    {"strlen", mcp_native_strlen, "($)i", NULL},
-    {"wasm_strcmp", mcp_native_strcmp, "($$)i", NULL},
-    {"strcpy", mcp_native_strcpy, "($$)i", NULL},
-    {"strcat", mcp_native_strcat, "($$)i", NULL},
-    {"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
-    {"strstr", mcp_native_strstr, "($$)i", NULL},
-    {"atoi", mcp_native_atoi, "($)i", NULL},
+    //{"strlen", mcp_native_strlen, "($)i", NULL},
+    //{"wasm_strcmp", mcp_native_strcmp, "($$)i", NULL},
+    //{"strcpy", mcp_native_strcpy, "($$)i", NULL},
+    {"strcat", mcp_native_strcat, "(**)i", NULL},
+    //{"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
+    //{"strstr", mcp_native_strstr, "($$)i", NULL},
+    //{"strncmp", mcp_native_strncmp, "($$i)i", NULL},
+
+    //{"atoi", mcp_native_atoi, "($)i", NULL},
     
     // Memory functions
-    {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
-    {"memcmp", mcp_native_memcmp, "(**i)i", NULL},
-    {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
+    //{"memcpy", mcp_native_memcpy, "(**i)i", NULL},
+    //{"memcmp", mcp_native_memcmp, "(**i)i", NULL},
+    
     
     // Logging functions
     {"log_info", mcp_native_log_info, "($$)i", NULL},
@@ -901,10 +912,10 @@ NativeSymbol mcp_core_host_functions[] = {
     {"get_tick_count", mcp_native_get_tick_count, "()i", NULL},
     
     // GPIO Control (ESP32-specific but reusable)
-    {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
-    {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
-    {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
-    {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
+    // {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
+    // {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
+    // {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
+    // {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
     
     // PWM Control (LEDC-based for music/speaker control)
     {"pwm_init", native_pwm_init, "(ii)i", NULL},
@@ -913,7 +924,7 @@ NativeSymbol mcp_core_host_functions[] = {
     {"pwm_set_frequency", native_pwm_set_frequency, "(ii)i", NULL},
     
     // SSE Events (MCP Protocol)
-    {"sse_send_event", native_sse_send_event, "($$)i", NULL},
+    //{"sse_send_event", native_sse_send_event, "($$)i", NULL},
     {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
     
     // JSON-RPC Protocol (MCP Framework)
@@ -921,11 +932,12 @@ NativeSymbol mcp_core_host_functions[] = {
     {"json_create_response", native_json_create_response, "($*~)i", NULL},
     {"json_create_error", native_json_create_error, "(i$*~)i", NULL},
     
+ 
     // HTTP Header Management (using buffer+length pattern)
     {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
-    {"get_request_header", mcp_native_get_request_header, "($*i)i", NULL},
-    {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
-    {"list_request_headers", mcp_native_list_request_headers, "(*i)i", NULL},
+    //{"get_request_header", mcp_native_get_request_header, "($*~)i", NULL},
+    //{"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
+    //{"list_request_headers", mcp_native_list_request_headers, "(*~)i", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);
