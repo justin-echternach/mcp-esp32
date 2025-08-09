@@ -14,7 +14,7 @@ DEFAULT_SDK_RELATIVE="../wasm_sdk"
 DEFAULT_OUTPUT_NAME=""
 DEFAULT_EXPORTS="handle_mcp_request"
 DEFAULT_STACK_SIZE="65536"
-DEFAULT_INITIAL_MEMORY="131072"
+DEFAULT_INITIAL_MEMORY="262144"
 
 # Function to display help
 show_help() {
@@ -206,6 +206,7 @@ fi
     $INCLUDE_FLAGS \
     -z stack-size=$STACK_SIZE \
     -Wl,--initial-memory=$INITIAL_MEMORY \
+    -Wl,--max-memory=$INITIAL_MEMORY \
     -nostdlib \
     -Wl,--no-entry \
     $EXPORT_FLAGS \

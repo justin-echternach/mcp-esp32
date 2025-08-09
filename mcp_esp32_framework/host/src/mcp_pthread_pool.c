@@ -277,7 +277,11 @@ static esp_err_t process_mcp_request(mcp_request_t* req) {
     wasm_runtime_clear_exception(module->wasm_module_inst);
     
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
-    
+
+    uint64_t app_start_offset = 0, app_end_offset = 0;
+    bool success = wasm_runtime_get_app_addr_range(module->wasm_module_inst, 0, &app_start_offset, &app_end_offset);
+    ESP_LOGI(TAG, "WASM memory range: success=%d, start=%llu, end=%llu, size=%llu",
+            success, app_start_offset, app_end_offset, app_end_offset - app_start_offset);
     // Clear request context after WASM execution
     mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
     

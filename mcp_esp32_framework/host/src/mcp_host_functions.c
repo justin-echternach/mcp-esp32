@@ -883,23 +883,23 @@ int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, 
 
 NativeSymbol mcp_core_host_functions[] = {
     // Memory management
-    //{"malloc", mcp_native_malloc, "(i)i", NULL},
-    //{"free", mcp_native_free, "(i)", NULL},
+    {"malloc", mcp_native_malloc, "(i)i", NULL},
+    {"free", mcp_native_free, "(i)", NULL},
     
     // String functions - using automatic string conversion ($)
-    //{"strlen", mcp_native_strlen, "($)i", NULL},
-    //{"wasm_strcmp", mcp_native_strcmp, "($$)i", NULL},
-    //{"strcpy", mcp_native_strcpy, "($$)i", NULL},
+    {"strlen", mcp_native_strlen, "($)i", NULL},
+    {"strcmp", mcp_native_strcmp, "($$)i", NULL},
+    {"strcpy", mcp_native_strcpy, "($$)i", NULL},
     {"strcat", mcp_native_strcat, "(**)i", NULL},
-    //{"wasm_strncpy", mcp_native_strncpy, "($*i)i", NULL},
-    //{"strstr", mcp_native_strstr, "($$)i", NULL},
-    //{"strncmp", mcp_native_strncmp, "($$i)i", NULL},
+    {"strncpy", mcp_native_strncpy, "($*i)i", NULL},
+    {"strstr", mcp_native_strstr, "($$)i", NULL},
+    {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
 
-    //{"atoi", mcp_native_atoi, "($)i", NULL},
+    {"atoi", mcp_native_atoi, "($)i", NULL},
     
     // Memory functions
-    //{"memcpy", mcp_native_memcpy, "(**i)i", NULL},
-    //{"memcmp", mcp_native_memcmp, "(**i)i", NULL},
+    {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
+    {"memcmp", mcp_native_memcmp, "(**i)i", NULL},
     
     
     // Logging functions
@@ -912,10 +912,10 @@ NativeSymbol mcp_core_host_functions[] = {
     {"get_tick_count", mcp_native_get_tick_count, "()i", NULL},
     
     // GPIO Control (ESP32-specific but reusable)
-    // {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
-    // {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
-    // {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
-    // {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
+    {"gpio_set_level", native_gpio_set_level, "(ii)i", NULL},
+    {"gpio_get_level", native_gpio_get_level, "(i)i", NULL},
+    {"gpio_set_direction", native_gpio_set_direction, "(ii)i", NULL},
+    {"gpio_is_pin_protected", native_gpio_is_pin_protected, "(i)i", NULL},
     
     // PWM Control (LEDC-based for music/speaker control)
     {"pwm_init", native_pwm_init, "(ii)i", NULL},
@@ -924,7 +924,7 @@ NativeSymbol mcp_core_host_functions[] = {
     {"pwm_set_frequency", native_pwm_set_frequency, "(ii)i", NULL},
     
     // SSE Events (MCP Protocol)
-    //{"sse_send_event", native_sse_send_event, "($$)i", NULL},
+    {"sse_send_event", native_sse_send_event, "($$)i", NULL},
     {"sse_send_tool_result", native_sse_send_tool_result, "($$)i", NULL},
     
     // JSON-RPC Protocol (MCP Framework)
@@ -935,9 +935,9 @@ NativeSymbol mcp_core_host_functions[] = {
  
     // HTTP Header Management (using buffer+length pattern)
     {"set_response_header", mcp_native_set_response_header, "($$)i", NULL},
-    //{"get_request_header", mcp_native_get_request_header, "($*~)i", NULL},
-    //{"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
-    //{"list_request_headers", mcp_native_list_request_headers, "(*~)i", NULL},
+    {"get_request_header", mcp_native_get_request_header, "($*~)i", NULL},
+    {"remove_response_header", mcp_native_remove_response_header, "($)i", NULL},
+    {"list_request_headers", mcp_native_list_request_headers, "(*~)i", NULL},
 };
 
 const int mcp_core_host_functions_count = sizeof(mcp_core_host_functions) / sizeof(NativeSymbol);
