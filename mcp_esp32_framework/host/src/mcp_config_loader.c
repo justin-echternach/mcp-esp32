@@ -125,8 +125,8 @@ bool mcp_config_init_defaults(mcp_config_t* config) {
     
     // Set system defaults
     config->system.max_wasm_modules = 2;
-    config->system.wasm_heap_size = 8192;      // 8KB heap
-    config->system.wasm_stack_size = 4096;     // 4KB stack  
+    config->system.wasm_heap_size = 262144;      // 256KB heap
+    config->system.wasm_stack_size = 65536;     // 64KB stack
     config->system.sse_max_clients = 8;
     config->system.mcp_timeout_ms = 5000;
     config->require_auth = false;
