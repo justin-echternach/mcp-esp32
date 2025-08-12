@@ -1,4 +1,5 @@
 #include "mcp_pthread_pool.h"
+#include "mcp_memory.h"
 #include "mcp_wasm_runtime.h"
 #include "mcp_session_manager.h"
 #include "mcp_host_functions.h"
@@ -41,7 +42,7 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
     }
 
     // Allocate worker pthread array
-    g_pool.workers = calloc(pool_size, sizeof(pthread_t));
+    g_pool.workers = mcp_calloc(pool_size, sizeof(pthread_t));
     if (!g_pool.workers)
     {
         ESP_LOGE(TAG, "Failed to allocate worker array");
@@ -52,11 +53,13 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
     // Create worker pthreads with larger stack size
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 32768); // 64KB stack
+    pthread_attr_setstacksize(&attr, 32768); // 32KB stack
+
+    // Currently with a 32KB stack the ESP32-WROVER-E supports 2 worker threads
 
     for (int i = 0; i < pool_size; i++)
     {
-        int *worker_id = malloc(sizeof(int));
+        int *worker_id = mcp_malloc(sizeof(int));
         *worker_id = i;
 
         int ret = pthread_create(&g_pool.workers[i], &attr, mcp_worker_thread, worker_id);
@@ -111,7 +114,7 @@ esp_err_t mcp_pthread_pool_shutdown(void)
     // Cleanup resources
     if (g_pool.workers)
     {
-        free(g_pool.workers);
+        mcp_free(g_pool.workers);
         g_pool.workers = NULL;
     }
 
@@ -129,7 +132,7 @@ esp_err_t mcp_pthread_pool_shutdown(void)
 static void *mcp_worker_thread(void *arg)
 {
     int worker_id = *(int *)arg;
-    free(arg); // Free the worker ID memory
+    mcp_free(arg); // Free the worker ID memory
 
     ESP_LOGI(TAG, "Worker pthread %d started, thread ID: %p", worker_id, (void *)pthread_self());
 
@@ -389,7 +392,7 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     }
 
     // Read request body
-    char *content = malloc(req->content_len + 1);
+    char *content = mcp_malloc(req->content_len + 1);
     if (!content)
     {
         ESP_LOGE(TAG, "Failed to allocate request buffer");
@@ -408,7 +411,9 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     content[ret] = '\0';
 
     // Create MCP request structure
-    mcp_request_t *mcp_req = heap_caps_malloc(sizeof(mcp_request_t), MALLOC_CAP_SPIRAM);
+    //mcp_request_t *mcp_req = heap_caps_malloc(sizeof(mcp_request_t), MALLOC_CAP_SPIRAM);
+    mcp_request_t *mcp_req = mcp_malloc(sizeof(mcp_request_t));
+
     if (!mcp_req)
     {
         ESP_LOGE(TAG, "Failed to allocate MCP request");
@@ -417,7 +422,8 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    mcp_req->response = heap_caps_malloc(resp_buffer_size, MALLOC_CAP_SPIRAM);
+    //mcp_req->response = heap_caps_malloc(resp_buffer_size, MALLOC_CAP_SPIRAM);
+    mcp_req->response = mcp_malloc(resp_buffer_size);
 
     // Extract important headers for WASM access (limited set for security/size)
     char header_buffer[1024] = {0};

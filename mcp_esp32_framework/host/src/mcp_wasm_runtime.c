@@ -1,4 +1,5 @@
 #include "mcp_wasm_runtime.h"
+#include "mcp_memory.h"
 #include "mcp_config.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
@@ -17,246 +18,6 @@
 #include "freertos/task.h"
 
 static const char *TAG = "mcp_wasm_runtime";
-
-// Initialize WASM runtime system
-bool mcp_wasm_runtime_init(mcp_wasm_runtime_t *runtime) {
-    if (!runtime) {
-        ESP_LOGE(TAG, "Runtime structure is NULL");
-        return false;
-    }
-    
-    // Initialize structure
-    memset(runtime, 0, sizeof(mcp_wasm_runtime_t));
-    
-    // Note: The actual wasm_runtime_init or wasm_runtime_full_init
-    // is expected to be called by the application with proper
-    // memory allocation configuration
-    
-    ESP_LOGI(TAG, "WASM runtime structure initialized");
-    return true;
-}
-
-// Initialize WAMR with full configuration
-bool mcp_wasm_runtime_full_init(RuntimeInitArgs *init_args) {
-    if (!init_args) {
-        ESP_LOGE(TAG, "Init args is NULL");
-        return false;
-    }
-    
-    if (!wasm_runtime_full_init(init_args)) {
-        ESP_LOGE(TAG, "WASM runtime full init failed");
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "WASM runtime fully initialized with custom configuration");
-    return true;
-}
-
-// Load WASM module from file
-// bool mcp_wasm_load_module_from_file(mcp_wasm_runtime_t *runtime, 
-//                                     const char *filename) {
-//     if (!runtime || !filename) {
-//         ESP_LOGE(TAG, "Invalid parameters");
-//         return false;
-//     }
-    
-//     // Open file
-//     FILE *file = fopen(filename, "rb");
-//     if (!file) {
-//         ESP_LOGE(TAG, "Failed to open file: %s", filename);
-//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-//                  "Failed to open file: %s", filename);
-//         return false;
-//     }
-    
-//     // Get file size
-//     fseek(file, 0, SEEK_END);
-//     runtime->wasm_file_size = ftell(file);
-//     fseek(file, 0, SEEK_SET);
-    
-//     // Allocate buffer
-//     runtime->wasm_file_buf = malloc(runtime->wasm_file_size);
-//     if (!runtime->wasm_file_buf) {
-//         ESP_LOGE(TAG, "Failed to allocate memory for WASM file");
-//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-//                  "Failed to allocate memory for WASM file");
-//         fclose(file);
-//         return false;
-//     }
-    
-//     // Read file
-//     size_t read_size = fread(runtime->wasm_file_buf, 1, runtime->wasm_file_size, file);
-//     fclose(file);
-    
-//     if (read_size != runtime->wasm_file_size) {
-//         ESP_LOGE(TAG, "Failed to read WASM file");
-//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-//                  "Failed to read WASM file");
-//         free(runtime->wasm_file_buf);
-//         runtime->wasm_file_buf = NULL;
-//         return false;
-//     }
-    
-//     // Load WASM module
-//     runtime->module = wasm_runtime_load(runtime->wasm_file_buf, 
-//                                        runtime->wasm_file_size, 
-//                                        runtime->error_buf, 
-//                                        sizeof(runtime->error_buf));
-    
-//     if (!runtime->module) {
-//         ESP_LOGE(TAG, "Failed to load WASM module: %s", runtime->error_buf);
-//         free(runtime->wasm_file_buf);
-//         runtime->wasm_file_buf = NULL;
-//         return false;
-//     }
-    
-//     ESP_LOGI(TAG, "WASM module loaded successfully from %s", filename);
-//     return true;
-// }
-
-// Register native host functions
-bool mcp_wasm_register_natives(const char *module_name,
-                              NativeSymbol *natives, 
-                              uint32_t n_natives) {
-    if (!module_name || !natives || n_natives == 0) {
-        ESP_LOGE(TAG, "Invalid native registration parameters");
-        return false;
-    }
-    
-    if (!wasm_runtime_register_natives(module_name, natives, n_natives)) {
-        ESP_LOGE(TAG, "Failed to register native functions");
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "Registered %u native functions for module '%s'", 
-             n_natives, module_name);
-    return true;
-}
-
-// Create module instance and execution environment
-bool mcp_wasm_instantiate_module(mcp_wasm_runtime_t *runtime,
-                                uint32_t stack_size,
-                                uint32_t heap_size) {
-    if (!runtime || !runtime->module) {
-        ESP_LOGE(TAG, "Invalid runtime or module not loaded");
-        return false;
-    }
-    
-    // Instantiate the module
-    runtime->module_inst = wasm_runtime_instantiate(runtime->module, 
-                                                   stack_size, 
-                                                   heap_size,
-                                                   runtime->error_buf, 
-                                                   sizeof(runtime->error_buf));
-    
-    if (!runtime->module_inst) {
-        ESP_LOGE(TAG, "Failed to instantiate WASM module: %s", runtime->error_buf);
-        return false;
-    }
-    
-    // Create execution environment
-    runtime->exec_env = wasm_runtime_create_exec_env(runtime->module_inst, stack_size);
-    if (!runtime->exec_env) {
-        ESP_LOGE(TAG, "Failed to create execution environment");
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Failed to create execution environment");
-        wasm_runtime_deinstantiate(runtime->module_inst);
-        runtime->module_inst = NULL;
-        return false;
-    }
-    
-    ESP_LOGI(TAG, "WASM module instantiated successfully (stack: %u, heap: %u)", 
-             stack_size, heap_size);
-    return true;
-}
-
-// Execute WASM function
-bool mcp_wasm_call_function(mcp_wasm_runtime_t *runtime,
-                           const char *func_name,
-                           uint32_t argc, 
-                           uint32_t argv[]) {
-    if (!runtime || !runtime->module_inst || !runtime->exec_env || !func_name) {
-        ESP_LOGE(TAG, "Invalid runtime state or parameters");
-        return false;
-    }
-    
-    // Get function
-    wasm_function_inst_t func = wasm_runtime_lookup_function(runtime->module_inst, 
-                                                             func_name);
-    if (!func) {
-        ESP_LOGE(TAG, "Function '%s' not found in WASM module", func_name);
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Function '%s' not found", func_name);
-        return false;
-    }
-    
-    // Call function
-    if (!wasm_runtime_call_wasm(runtime->exec_env, func, argc, argv)) {
-        const char *exception = wasm_runtime_get_exception(runtime->module_inst);
-        ESP_LOGE(TAG, "Failed to call WASM function '%s': %s", 
-                 func_name, exception ? exception : "unknown error");
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Function call failed: %s", exception ? exception : "unknown error");
-        return false;
-    }
-    
-    ESP_LOGD(TAG, "Successfully called WASM function '%s'", func_name);
-    return true;
-}
-
-// Get function from module
-wasm_function_inst_t mcp_wasm_get_function(mcp_wasm_runtime_t *runtime,
-                                           const char *func_name) {
-    if (!runtime || !runtime->module_inst || !func_name) {
-        return NULL;
-    }
-    
-    return wasm_runtime_lookup_function(runtime->module_inst, func_name);
-}
-
-// Cleanup and destroy runtime
-void mcp_wasm_runtime_cleanup(mcp_wasm_runtime_t *runtime) {
-    if (!runtime) {
-        return;
-    }
-    
-    // Destroy execution environment
-    if (runtime->exec_env) {
-        wasm_runtime_destroy_exec_env(runtime->exec_env);
-        runtime->exec_env = NULL;
-    }
-    
-    // Deinstantiate module
-    if (runtime->module_inst) {
-        wasm_runtime_deinstantiate(runtime->module_inst);
-        runtime->module_inst = NULL;
-    }
-    
-    // Unload module
-    if (runtime->module) {
-        wasm_runtime_unload(runtime->module);
-        runtime->module = NULL;
-    }
-    
-    // Free WASM file buffer
-    // if (runtime->wasm_file_buf) {
-    //     free(runtime->wasm_file_buf);
-    //     runtime->wasm_file_buf = NULL;
-    // }
-    
-    // Destroy WASM runtime
-    wasm_runtime_destroy();
-    
-    ESP_LOGI(TAG, "WASM runtime cleaned up");
-}
-
-// Get last error message
-const char* mcp_wasm_get_last_error(mcp_wasm_runtime_t *runtime) {
-    if (!runtime) {
-        return "Runtime structure is NULL";
-    }
-    return runtime->error_buf;
-}
 
 // ========== SD Card and File Operations ==========
 
@@ -346,116 +107,6 @@ bool mcp_wasm_mount_sd_card(void) {
     }
 }
 
-// Load WASM file from SD card
-uint8_t* mcp_wasm_load_from_sd(const char* filename, unsigned* file_size) {
-    ESP_LOGI(TAG, "Attempting direct WASM file load (skipping directory listing)...");
-    
-    // Add delay to let SD card stabilize after mount
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    
-    char filepath[256];
-    snprintf(filepath, sizeof(filepath), "/sdcard/wasm/%s", filename);
-    
-    ESP_LOGI(TAG, "Loading WASM file: %s", filepath);
-    
-    // Try to access the file with detailed error reporting
-    ESP_LOGI(TAG, "Attempting to open file: %s", filepath);
-    
-    FILE* file = fopen(filepath, "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "❌ Failed to open WASM file: %s", filepath);
-        ESP_LOGI(TAG, "Error details: %s", strerror(errno));
-        
-        // Try just opening the directory to see if it exists
-        DIR *wasm_dir = opendir("/sdcard/wasm");
-        if (wasm_dir) {
-            ESP_LOGI(TAG, "✅ /sdcard/wasm directory exists, checking contents:");
-            struct dirent *entry;
-            int file_count = 0;
-            while ((entry = readdir(wasm_dir)) != NULL) {
-                ESP_LOGI(TAG, "  Found: %s", entry->d_name);
-                file_count++;
-            }
-            ESP_LOGI(TAG, "Total files in /wasm/: %d", file_count);
-            closedir(wasm_dir);
-        } else {
-            ESP_LOGE(TAG, "❌ /sdcard/wasm directory does not exist!");
-            ESP_LOGI(TAG, "Directory error: %s", strerror(errno));
-        }
-        
-        return NULL;
-    }
-    
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    long size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-    
-    if (size <= 0) {
-        ESP_LOGE(TAG, "❌ Invalid WASM file size: %ld", size);
-        fclose(file);
-        return NULL;
-    }
-    
-    // Allocate buffer
-    uint8_t* buffer = (uint8_t*)malloc(size);
-    if (!buffer) {
-        ESP_LOGE(TAG, "❌ Failed to allocate memory for WASM file (%ld bytes)", size);
-        fclose(file);
-        return NULL;
-    }
-    
-    // Read file
-    size_t bytes_read = fread(buffer, 1, size, file);
-    fclose(file);
-    
-    if (bytes_read != size) {
-        ESP_LOGE(TAG, "❌ Failed to read WASM file completely. Expected: %ld, Read: %zu", size, bytes_read);
-        free(buffer);
-        return NULL;
-    }
-    
-    *file_size = (unsigned)size;
-    ESP_LOGI(TAG, "✅ Successfully loaded WASM file: %s (%u bytes)", filename, *file_size);
-    return buffer;
-}
-
-// ========== WASM Execution Utilities ==========
-
-// Create execution environment with optimal settings
-wasm_exec_env_t mcp_wasm_create_exec_env(wasm_module_inst_t module_inst) {
-    // Use same stack size as instantiation like the examples
-    uint32_t stack_size = 8192;
-    
-    wasm_exec_env_t env = wasm_runtime_create_exec_env(module_inst, stack_size);
-    if (env) {
-        ESP_LOGI(TAG, "✅ Created exec env with %d byte stack", stack_size);
-        return env;
-    }
-    
-    ESP_LOGE(TAG, "❌ Exec env creation failed with %d byte stack", stack_size);
-    return NULL;
-}
-
-// Safe WASM function call wrapper (handles threading issues)
-bool mcp_wasm_safe_call(wasm_exec_env_t exec_env, wasm_function_inst_t func, 
-                        uint32_t argc, uint32_t *argv) {
-    if (!exec_env || !func) return false;
-    
-    ESP_LOGD(TAG, "Attempting WASM function call...");
-    
-    // Try the call - this may crash due to threading issues
-    bool result = wasm_runtime_call_wasm(exec_env, func, argc, argv);
-    
-    if (result) {
-        ESP_LOGD(TAG, "WASM call succeeded");
-    } else {
-        ESP_LOGD(TAG, "WASM call failed");
-    }
-    
-    return result;
-}
-
 // Debug: Dump WASM module exports for inspection
 void mcp_wasm_dump_exports(wasm_module_t module, const char* module_name) {
     if (!module) {
@@ -512,8 +163,7 @@ bool mcp_wasm_registry_init(void) {
     pthread_mutex_lock(&g_mcp_modules_mutex);
     
     // Initialize all modules to empty state
-    //memset(g_mcp_modules, 0, sizeof(g_mcp_modules));
-    g_mcp_modules = heap_caps_malloc(sizeof(mcp_wasm_module_t) * 8, MALLOC_CAP_SPIRAM);
+    g_mcp_modules = mcp_malloc_module_registry(8, sizeof(mcp_wasm_module_t));
     g_mcp_module_count = 0;
     g_registry_initialized = true;
     
@@ -583,7 +233,8 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     
     // Allocate buffer - use smaller heap size to save memory
     //uint8_t *wasm_file_buf = heap_caps_malloc(file_size, MALLOC_CAP_8BIT);
-    uint8_t *wasm_file_buf = heap_caps_aligned_alloc(4, file_size, MALLOC_CAP_SPIRAM); // this meets the 4 byte alignment requirement for AOT and allows us to use psram
+    //uint8_t *wasm_file_buf = heap_caps_aligned_alloc(4, file_size, MALLOC_CAP_SPIRAM); // this meets the 4 byte alignment requirement for AOT and allows us to use psram
+    uint8_t *wasm_file_buf = mcp_malloc_wasm_buffer(file_size);
     module->wasm_file_buf = wasm_file_buf; // this is crucial ... WAMR uses this buffer and it needs to stay around while the module is loaded
     module->wasm_file_size = file_size;
 
@@ -611,7 +262,7 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     
     if (bytes_read != file_size) {
         ESP_LOGE(TAG, "Failed to read WASM file completely");
-        heap_caps_free(wasm_file_buf);
+        mcp_free(wasm_file_buf);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
     }
@@ -639,77 +290,11 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     ESP_LOGI(TAG, "  ❌ WASM_ENABLE_JIT not defined");
 #endif
     
-    // DEBUGGING: Inspect WASM file buffer for target string BEFORE wasm_runtime_load
-    // const char* target_string = "mcp_handle_request:About to check tools/list";
-    // size_t target_len = strlen(target_string);
-    // bool found_before = false;
-    // size_t found_offset_before = 0;
-    
-    // ESP_LOGI(TAG, "🔍 BEFORE wasm_runtime_load - Searching for string: '%s'", target_string);
-    // ESP_LOGI(TAG, "🔍 File size: %ld bytes, searching for %zu byte string", file_size, target_len);
-    
-    // for (size_t i = 0; i <= file_size - target_len; i++) {
-    //     if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-    //         found_before = true;
-    //         found_offset_before = i;
-    //         ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer BEFORE load", i, i);
-            
-    //         // Show surrounding bytes
-    //         ESP_LOGI(TAG, "🔍 Surrounding bytes at offset 0x%zx:", i);
-    //         size_t start = (i >= 16) ? i - 16 : 0;
-    //         size_t end = (i + target_len + 16 < file_size) ? i + target_len + 16 : file_size;
-            
-    //         for (size_t j = start; j < end; j++) {
-    //             if (j == i) ESP_LOGI(TAG, "🔍   [TARGET START] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-    //             else if (j == i + target_len) ESP_LOGI(TAG, "🔍   [TARGET END] offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-    //             else ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-    //         }
-    //         break;
-    //     }
-    // }
-    
-    // if (!found_before) {
-    //     ESP_LOGW(TAG, "🔍 String NOT found in file buffer before load");
-    // }
-    
     // Load WASM module
     char error_buf[128];
     ESP_LOGI(TAG, "🔍 Calling wasm_runtime_load...");
     module->wasm_module = wasm_runtime_load(wasm_file_buf, file_size, error_buf, sizeof(error_buf));
     ESP_LOGI(TAG, "🔍 wasm_runtime_load returned: %p", module->wasm_module);
-    
-    // DEBUGGING: Inspect WASM file buffer for target string AFTER wasm_runtime_load
-    // ESP_LOGI(TAG, "🔍 AFTER wasm_runtime_load - Searching for string: '%s'", target_string);
-    // bool found_after = false;
-    // size_t found_offset_after = 0;
-    
-    // for (size_t i = 0; i <= file_size - target_len; i++) {
-    //     if (memcmp(wasm_file_buf + i, target_string, target_len) == 0) {
-    //         found_after = true;
-    //         found_offset_after = i;
-    //         ESP_LOGI(TAG, "🔍 FOUND string at offset 0x%zx (%zu) in file buffer AFTER load", i, i);
-    //         break;
-    //     }
-    // }
-    
-    // if (!found_after && found_before) {
-    //     ESP_LOGI(TAG, "🚨 STRING DISAPPEARED from file buffer after wasm_runtime_load!");
-    //     ESP_LOGI(TAG, "🚨 This confirms the issue: wasm_runtime_load modified the file buffer");
-        
-    //     // Check what's at the original location now
-    //     ESP_LOGI(TAG, "🔍 Checking what's at original offset 0x%zx now:", found_offset_before);
-    //     for (size_t j = found_offset_before; j < found_offset_before + target_len && j < file_size; j++) {
-    //         ESP_LOGI(TAG, "🔍   offset 0x%zx: 0x%02x '%c'", j, wasm_file_buf[j], (wasm_file_buf[j] >= 32 && wasm_file_buf[j] < 127) ? wasm_file_buf[j] : '.');
-    //     }
-    // } else if (found_after && found_before && found_offset_after == found_offset_before) {
-    //     ESP_LOGI(TAG, "✅ String still present at same location after wasm_runtime_load");
-    // } else if (found_after && found_before && found_offset_after != found_offset_before) {
-    //     ESP_LOGI(TAG, "🔄 String moved from 0x%zx to 0x%zx after wasm_runtime_load", found_offset_before, found_offset_after);
-    // } else if (!found_before && !found_after) {
-    //     ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
-    // }
-    
-    //heap_caps_free(wasm_file_buf);
     
     if (!module->wasm_module) {
         ESP_LOGE(TAG, "Failed to load WASM module %s: %s", wasm_filename, error_buf);
@@ -850,7 +435,7 @@ void mcp_wasm_registry_cleanup(void) {
                 wasm_runtime_unload(g_mcp_modules[i].wasm_module);
             }
             if (g_mcp_modules[i].wasm_file_buf) {
-                heap_caps_free(g_mcp_modules[i].wasm_file_buf);
+                mcp_free(g_mcp_modules[i].wasm_file_buf);
                 g_mcp_modules[i].wasm_file_buf = NULL;
                 g_mcp_modules[i].wasm_file_size = 0;
             }

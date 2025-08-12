@@ -6,5 +6,6 @@ idf_component_register(SRCS "main.c"
                             "../mcp_esp32_framework/host/src/mcp_wasm_runtime.c"
                             "../mcp_esp32_framework/host/src/mcp_pthread_pool.c"
                             "../mcp_esp32_framework/host/src/mcp_session_manager.c"
+                            "../mcp_esp32_framework/host/src/mcp_memory.c"
                     INCLUDE_DIRS "." "../mcp_esp32_framework/host/include"
                     REQUIRES driver wamr fatfs esp_http_server nvs_flash esp_wifi)
