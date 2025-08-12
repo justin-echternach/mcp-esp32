@@ -224,18 +224,18 @@ mcp_result_t play_melody_handler(const char* params) {
                 
                 notes_played++;
                 
-                // Wait for note duration (simple blocking approach)
-                // In a more advanced implementation, this could be non-blocking
-                for (int i = 0; i < duration / 10; i++) {
-                    // Simple delay loop - 10ms increments
-                    // Could be improved with proper timing later
-                    if (!is_playing) break;  // Allow early stop
-                }
-                
-                // Small gap between notes to make them distinct
-                i2s_stop_tone();
-                for (int i = 0; i < 5; i++) {
-                    // 50ms gap between notes
+                // Wait for note to finish playing
+                // Use polling with small sleeps to avoid blocking the watchdog
+                int wait_loops = (duration + 50) / 10;  // Check every 10ms
+                for (int i = 0; i < wait_loops; i++) {
+                    // Check if still playing (this yields to scheduler)
+                    if (i2s_is_playing() == 0) {
+                        break;  // Note finished early
+                    }
+                    // Small delay to yield CPU (prevents watchdog)
+                    for (volatile int j = 0; j < 10000; j++) {
+                        // ~10ms delay
+                    }
                 }
             } else {
                 log_error("MUSIC", "Failed to parse note");
