@@ -1,4 +1,5 @@
 #include "mcp_host_functions.h"
+#include "mcp_memory.h"
 #include "mcp_config_loader.h"
 #include "mcp_session_manager.h"
 #include "mcp_pthread_pool.h"
@@ -12,8 +13,10 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/i2s.h"
 #include "mcp_config.h"
 #include "mcp_http_server.h"
+#include <math.h>
 
 static const char* TAG = "MCP_HOST";
 
@@ -907,6 +910,320 @@ int32_t mcp_native_list_request_headers(wasm_exec_env_t exec_env, char* buffer, 
     return strlen(buffer);
 }
 
+// ========== I2S Audio Functions ==========
+
+// I2S configuration and state
+static bool i2s_initialized = false;
+static int32_t i2s_sample_rate = 44100;
+static int32_t i2s_bits_per_sample = 16;
+static int32_t i2s_volume = 50; // Default 50%
+static bool i2s_playing = false;
+static esp_timer_handle_t i2s_timer_handle = NULL;
+static TaskHandle_t i2s_task_handle = NULL;
+
+// I2S pin configuration (FreenoVE Audio Converter & Amplifier)
+#define I2S_BCK_PIN 27   // Bit Clock
+#define I2S_WS_PIN  26   // Word Select (LRC)
+#define I2S_DATA_PIN 25  // Data Input (DIN)
+
+// Audio generation parameters
+#define I2S_SAMPLE_BUFFER_SIZE 512
+#define I2S_DMA_DESC_NUM 8
+#define I2S_DMA_FRAME_NUM 64
+#define SINE_TABLE_SIZE 1024
+
+// Pre-computed sine wave table for efficiency
+static int16_t *sine_table = NULL;
+static float current_frequency = 0.0f;
+static float phase_accumulator = 0.0f;
+
+// Initialize sine wave lookup table
+static esp_err_t init_sine_table(void) {
+    if (sine_table != NULL) return ESP_OK;
+    
+    // Use smart allocation - sine table can go in PSRAM for memory efficiency
+    sine_table = (int16_t*)mcp_malloc(SINE_TABLE_SIZE * sizeof(int16_t));
+    if (!sine_table) {
+        ESP_LOGE(TAG, "Failed to allocate sine table");
+        return ESP_ERR_NO_MEM;
+    }
+    
+    for (int i = 0; i < SINE_TABLE_SIZE; i++) {
+        float angle = 2.0f * M_PI * i / SINE_TABLE_SIZE;
+        sine_table[i] = (int16_t)(sin(angle) * 32767);
+    }
+    
+    ESP_LOGI(TAG, "Sine table initialized (%d samples)", SINE_TABLE_SIZE);
+    return ESP_OK;
+}
+
+// Audio generation task
+static void i2s_audio_task(void *pvParameters) {
+    // I2S DMA requires internal memory that's DMA-capable
+    size_t buffer_size = I2S_SAMPLE_BUFFER_SIZE * sizeof(int16_t) * 2;
+    int16_t *sample_buffer = heap_caps_malloc(buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    if (!sample_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate I2S sample buffer");
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    size_t bytes_written;
+    float phase_increment = (current_frequency * SINE_TABLE_SIZE) / i2s_sample_rate;
+    
+    while (i2s_playing) {
+        // Generate samples
+        for (int i = 0; i < I2S_SAMPLE_BUFFER_SIZE; i++) {
+            int table_index = (int)phase_accumulator % SINE_TABLE_SIZE;
+            int16_t sample = (sine_table[table_index] * i2s_volume) / 100;
+            
+            // Stereo output (left and right channels)
+            sample_buffer[i * 2] = sample;     // Left channel
+            sample_buffer[i * 2 + 1] = sample; // Right channel
+            
+            phase_accumulator += phase_increment;
+            if (phase_accumulator >= SINE_TABLE_SIZE) {
+                phase_accumulator -= SINE_TABLE_SIZE;
+            }
+        }
+        
+        // Write to I2S
+        esp_err_t ret = i2s_write(I2S_NUM_0, sample_buffer, 
+                                  I2S_SAMPLE_BUFFER_SIZE * sizeof(int16_t) * 2, 
+                                  &bytes_written, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S write failed: %s", esp_err_to_name(ret));
+            break;
+        }
+    }
+    
+    heap_caps_free(sample_buffer);
+    i2s_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+// Timer callback for tone duration
+static void i2s_timer_callback(void *arg) {
+    i2s_playing = false;
+    if (i2s_timer_handle) {
+        esp_timer_stop(i2s_timer_handle);
+    }
+    ESP_LOGD(TAG, "I2S tone duration completed");
+}
+
+int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t bits_per_sample) {
+    if (i2s_initialized) {
+        ESP_LOGW(TAG, "I2S already initialized");
+        return 0;
+    }
+    
+    // Validate parameters
+    if (sample_rate != 8000 && sample_rate != 16000 && sample_rate != 22050 && 
+        sample_rate != 44100 && sample_rate != 48000) {
+        ESP_LOGE(TAG, "Unsupported sample rate: %d", sample_rate);
+        return -1;
+    }
+    
+    if (bits_per_sample != 16 && bits_per_sample != 32) {
+        ESP_LOGE(TAG, "Unsupported bits per sample: %d", bits_per_sample);
+        return -2;
+    }
+    
+    // Initialize sine table
+    esp_err_t ret = init_sine_table();
+    if (ret != ESP_OK) {
+        return -3;
+    }
+    
+    // Configure I2S
+    i2s_config_t i2s_config = {
+        .mode = I2S_MODE_MASTER | I2S_MODE_TX,
+        .sample_rate = sample_rate,
+        .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+        .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
+        .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+        .tx_desc_auto_clear = true,
+        .dma_desc_num = I2S_DMA_DESC_NUM,
+        .dma_frame_num = I2S_DMA_FRAME_NUM,
+        .use_apll = false,
+        .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1
+    };
+    
+    i2s_pin_config_t pin_config = {
+        .bck_io_num = I2S_BCK_PIN,
+        .ws_io_num = I2S_WS_PIN,
+        .data_out_num = I2S_DATA_PIN,
+        .data_in_num = I2S_PIN_NO_CHANGE
+    };
+    
+    // Install and start I2S driver
+    ret = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S driver install failed: %s", esp_err_to_name(ret));
+        return -4;
+    }
+    
+    ret = i2s_set_pin(I2S_NUM_0, &pin_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "I2S set pin failed: %s", esp_err_to_name(ret));
+        i2s_driver_uninstall(I2S_NUM_0);
+        return -5;
+    }
+    
+    // Create timer for tone duration
+    esp_timer_create_args_t timer_args = {
+        .callback = i2s_timer_callback,
+        .name = "i2s_timer"
+    };
+    ret = esp_timer_create(&timer_args, &i2s_timer_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create I2S timer: %s", esp_err_to_name(ret));
+        i2s_driver_uninstall(I2S_NUM_0);
+        return -6;
+    }
+    
+    i2s_sample_rate = sample_rate;
+    i2s_bits_per_sample = bits_per_sample;
+    i2s_initialized = true;
+    i2s_playing = false;
+    
+    ESP_LOGI(TAG, "I2S initialized: %dHz, %d-bit, pins BCK=%d WS=%d DATA=%d", 
+             sample_rate, bits_per_sample, I2S_BCK_PIN, I2S_WS_PIN, I2S_DATA_PIN);
+    
+    return 0;
+}
+
+int32_t native_i2s_deinit(wasm_exec_env_t exec_env) {
+    if (!i2s_initialized) {
+        return 0;
+    }
+    
+    // Stop playback
+    native_i2s_stop_tone(exec_env);
+    
+    // Clean up timer
+    if (i2s_timer_handle) {
+        esp_timer_delete(i2s_timer_handle);
+        i2s_timer_handle = NULL;
+    }
+    
+    // Uninstall I2S driver
+    i2s_driver_uninstall(I2S_NUM_0);
+    
+    // Free sine table
+    if (sine_table) {
+        mcp_free(sine_table);
+        sine_table = NULL;
+    }
+    
+    i2s_initialized = false;
+    ESP_LOGI(TAG, "I2S deinitialized");
+    
+    return 0;
+}
+
+int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent) {
+    if (!i2s_initialized) {
+        ESP_LOGE(TAG, "I2S not initialized");
+        return -1;
+    }
+    
+    // Validate parameters
+    if (frequency_hz < 20 || frequency_hz > 20000) {
+        ESP_LOGE(TAG, "Frequency out of range: %d Hz", frequency_hz);
+        return -2;
+    }
+    
+    if (volume_percent < 0 || volume_percent > 100) {
+        ESP_LOGE(TAG, "Volume out of range: %d%%", volume_percent);
+        return -3;
+    }
+    
+    // Stop any current playback
+    native_i2s_stop_tone(exec_env);
+    
+    // Set audio parameters
+    current_frequency = (float)frequency_hz;
+    i2s_volume = volume_percent;
+    phase_accumulator = 0.0f;
+    i2s_playing = true;
+    
+    // Create audio generation task
+    BaseType_t task_ret = xTaskCreate(
+        i2s_audio_task,
+        "i2s_audio",
+        4096,
+        NULL,
+        5,
+        &i2s_task_handle
+    );
+    
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create I2S audio task");
+        i2s_playing = false;
+        return -4;
+    }
+    
+    // Set duration timer if specified
+    if (duration_ms > 0) {
+        esp_err_t ret = esp_timer_start_once(i2s_timer_handle, duration_ms * 1000);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to start duration timer: %s", esp_err_to_name(ret));
+        }
+    }
+    
+    ESP_LOGI(TAG, "Playing I2S tone: %d Hz, %d ms, %d%% volume", frequency_hz, duration_ms, volume_percent);
+    
+    return 0;
+}
+
+int32_t native_i2s_stop_tone(wasm_exec_env_t exec_env) {
+    if (!i2s_initialized) {
+        return -1;
+    }
+    
+    // Stop playback
+    i2s_playing = false;
+    
+    // Stop timer if running
+    if (i2s_timer_handle) {
+        esp_timer_stop(i2s_timer_handle);
+    }
+    
+    // Wait for task to finish
+    if (i2s_task_handle) {
+        // Give task time to exit gracefully
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (i2s_task_handle) {
+            vTaskDelete(i2s_task_handle);
+            i2s_task_handle = NULL;
+        }
+    }
+    
+    // Clear I2S DMA buffer
+    i2s_zero_dma_buffer(I2S_NUM_0);
+    
+    ESP_LOGI(TAG, "I2S tone stopped");
+    
+    return 0;
+}
+
+int32_t native_i2s_set_volume(wasm_exec_env_t exec_env, int32_t volume_percent) {
+    if (volume_percent < 0 || volume_percent > 100) {
+        ESP_LOGE(TAG, "Volume out of range: %d%%", volume_percent);
+        return -1;
+    }
+    
+    i2s_volume = volume_percent;
+    ESP_LOGI(TAG, "I2S volume set to %d%%", volume_percent);
+    
+    return 0;
+}
+
+int32_t native_i2s_is_playing(wasm_exec_env_t exec_env) {
+    return i2s_playing ? 1 : 0;
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -950,6 +1267,14 @@ NativeSymbol mcp_core_host_functions[] = {
     {"pwm_set_duty", native_pwm_set_duty, "(ii)i", NULL},
     {"pwm_stop", native_pwm_stop, "(i)i", NULL},
     {"pwm_set_frequency", native_pwm_set_frequency, "(ii)i", NULL},
+    
+    // I2S Audio Control (for high-quality audio output)
+    {"i2s_init", native_i2s_init, "(ii)i", NULL},
+    {"i2s_deinit", native_i2s_deinit, "()i", NULL},
+    {"i2s_play_tone", native_i2s_play_tone, "(iii)i", NULL},
+    {"i2s_stop_tone", native_i2s_stop_tone, "()i", NULL},
+    {"i2s_set_volume", native_i2s_set_volume, "(i)i", NULL},
+    {"i2s_is_playing", native_i2s_is_playing, "()i", NULL},
     
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},

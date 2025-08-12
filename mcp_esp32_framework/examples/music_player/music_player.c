@@ -2,10 +2,9 @@
 #include <stdio.h>
 
 // Music Player MCP Module
-// This demonstrates how to implement a music player using PWM for speaker control
+// This demonstrates how to implement a music player using I2S for high-quality audio output
 
 // Configuration
-#define DEFAULT_PWM_PIN 26
 #define DEFAULT_VOLUME 50  // 0-100%
 #define MAX_NOTE_LENGTH 8  // "C#7:1000"
 #define MAX_MELODY_LENGTH 512
@@ -114,7 +113,6 @@ static void init_note_frequencies(void) {
 
 // Global state
 static int current_volume = DEFAULT_VOLUME;
-static int current_pin = DEFAULT_PWM_PIN;
 static bool is_playing = false;
 
 // Forward declarations
@@ -159,8 +157,8 @@ mcp_result_t play_note_handler(const char* params) {
     
     // Create human-readable success response
     snprintf(result_json, sizeof(result_json),
-        "Playing note %s for %dms at volume %d%% on GPIO pin %d",
-        note, duration, volume, current_pin);
+        "Playing note %s for %dms at volume %d%% via I2S audio",
+        note, duration, volume);
     
     return mcp_success(result_json);
 }
@@ -200,14 +198,14 @@ mcp_result_t stop_music_handler(const char* params) {
     
     log_info("MUSIC", "stop_music_handler called");
     
-    // Stop PWM if playing
+    // Stop I2S playback if playing
     if (is_playing) {
-        pwm_stop(current_pin);
+        i2s_stop_tone();
         is_playing = false;
     }
     
     snprintf(result_json, sizeof(result_json),
-        "Music playback stopped on GPIO pin %d", current_pin);
+        "Music playback stopped via I2S audio");
     
     return mcp_success(result_json);
 }
@@ -228,10 +226,15 @@ mcp_result_t set_volume_handler(const char* params) {
         return mcp_error(-2, "Volume must be between 0 and 100");
     }
     
+    // Set I2S volume in real-time
+    if (i2s_set_volume(volume) != 0) {
+        return mcp_error(-3, "Failed to set I2S volume");
+    }
+    
     current_volume = volume;
     
     snprintf(result_json, sizeof(result_json),
-        "Volume set to %d%%", current_volume);
+        "I2S volume set to %d%%", current_volume);
     
     return mcp_success(result_json);
 }
@@ -276,7 +279,7 @@ static int parse_note_duration(const char* note_with_duration, char* note_out, i
     return 0;
 }
 
-// Helper: Play a single note using PWM
+// Helper: Play a single note using I2S
 static mcp_result_t play_single_note(const char* note, int duration, int volume) {
     float frequency = get_note_frequency(note);
     
@@ -284,23 +287,14 @@ static mcp_result_t play_single_note(const char* note, int duration, int volume)
         return mcp_error(-4, "Unknown note name");
     }
     
-    log_info("MUSIC", "Playing note with PWM");
+    log_info("MUSIC", "Playing note with I2S");
     
-    // Initialize PWM for the frequency
-    if (pwm_init(current_pin, (int32_t)frequency) != 0) {
-        return mcp_error(-5, "Failed to initialize PWM");
-    }
-    
-    // Set duty cycle based on volume (0-100% -> 0-50% duty for speaker)
-    int duty = (volume * 50) / 100;  // Scale to 0-50% duty cycle
-    if (pwm_set_duty(current_pin, duty) != 0) {
-        return mcp_error(-6, "Failed to set PWM duty cycle");
+    // Play tone using I2S with precise frequency, duration, and volume
+    if (i2s_play_tone((int32_t)frequency, duration, volume) != 0) {
+        return mcp_error(-5, "Failed to play I2S tone");
     }
     
     is_playing = true;
-    
-    // TODO: Implement non-blocking delay for duration
-    // For now, the host application will need to handle timing
     
     return mcp_success("{}");
 }
@@ -339,6 +333,13 @@ void _start(void) {
     
     // Initialize note frequency table on heap first
     init_note_frequencies();
+    
+    // Initialize I2S audio system (44.1kHz, 16-bit)
+    if (i2s_init(44100, 16) != 0) {
+        log_error("MUSIC", "Failed to initialize I2S audio system");
+        return;
+    }
+    log_info("MUSIC", "I2S audio system initialized successfully");
     
     // Initialize MCP server
     if (mcp_server_init("music_player", "1.0.0") != 0) {

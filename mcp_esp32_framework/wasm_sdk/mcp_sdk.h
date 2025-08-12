@@ -82,6 +82,14 @@ extern int32_t pwm_set_duty(int32_t pin, int32_t duty_percent);
 extern int32_t pwm_stop(int32_t pin);
 extern int32_t pwm_set_frequency(int32_t pin, int32_t frequency);
 
+// I2S Audio Control (high-quality audio output)
+extern int32_t i2s_init(int32_t sample_rate, int32_t bits_per_sample);
+extern int32_t i2s_deinit(void);
+extern int32_t i2s_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
+extern int32_t i2s_stop_tone(void);
+extern int32_t i2s_set_volume(int32_t volume_percent);
+extern int32_t i2s_is_playing(void);
+
 // SSE Events
 extern int32_t sse_send_event(const char* event_type, const char* data);
 extern int32_t sse_send_tool_result(const char* tool_name, const char* result);

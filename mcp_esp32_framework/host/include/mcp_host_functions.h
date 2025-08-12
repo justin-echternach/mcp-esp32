@@ -211,6 +211,62 @@ int32_t native_pwm_stop(wasm_exec_env_t exec_env, int32_t pin);
  */
 int32_t native_pwm_set_frequency(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency);
 
+// ========== I2S Audio Functions ==========
+
+  /**
+   * @brief Initialize I2S audio system
+   * 
+   * @param exec_env WASM execution environment
+   * @param sample_rate Sample rate in Hz (8000, 16000, 22050, 44100, 48000)
+   * @param bits_per_sample Bits per sample (16 or 32)
+   * @return 0 on success, negative on error
+   */
+  int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t bits_per_sample);
+
+  /**
+   * @brief Deinitialize I2S audio system
+   * 
+   * @param exec_env WASM execution environment
+   * @return 0 on success, negative on error
+   */
+  int32_t native_i2s_deinit(wasm_exec_env_t exec_env);
+
+  /**
+   * @brief Play a tone at specified frequency
+   * 
+   * @param exec_env WASM execution environment
+   * @param frequency_hz Frequency in Hz (20-20000)
+   * @param duration_ms Duration in milliseconds (0 = indefinite)
+   * @param volume_percent Volume percentage (0-100)
+   * @return 0 on success, negative on error
+   */
+  int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
+
+  /**
+   * @brief Stop current tone playback
+   * 
+   * @param exec_env WASM execution environment
+   * @return 0 on success, negative on error
+   */
+  int32_t native_i2s_stop_tone(wasm_exec_env_t exec_env);
+
+  /**
+   * @brief Set I2S audio volume
+   * 
+   * @param exec_env WASM execution environment  
+   * @param volume_percent Volume percentage (0-100)
+   * @return 0 on success, negative on error
+   */
+  int32_t native_i2s_set_volume(wasm_exec_env_t exec_env, int32_t volume_percent);
+
+  /**
+   * @brief Check if I2S audio is currently playing
+   * 
+   * @param exec_env WASM execution environment
+   * @return 1 if playing, 0 if stopped, negative on error
+   */
+  int32_t native_i2s_is_playing(wasm_exec_env_t exec_env);
+
 // ========== WAMR Runtime Memory Allocators (ESP32-specific) ==========
 
 /**
