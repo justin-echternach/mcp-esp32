@@ -136,10 +136,8 @@ int32_t mcp_native_strcat(wasm_exec_env_t exec_env, char* dest, const char* src)
     strcat(dest, src);
     
     // Convert host pointer back to WASM address
-    //uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
-    //return wasm_addr;
-    //return (int32_t)dest;
-    return 0;
+    uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
+    return wasm_addr;
 }
 
 int32_t mcp_native_strncpy(wasm_exec_env_t exec_env, char* dest, const char* src, int32_t n) {
@@ -679,14 +677,14 @@ static int ensure_response_headers_capacity(mcp_request_t* request, size_t neede
     if (!request->response_headers) {
         // Initial allocation
         request->response_headers_capacity = needed > 1024 ? needed : 1024;
-        request->response_headers = malloc(request->response_headers_capacity);
+        request->response_headers = heap_caps_malloc(request->response_headers_capacity, MALLOC_CAP_SPIRAM);
         if (!request->response_headers) return -1;
         request->response_headers[0] = '\0';
         request->response_headers_length = 0;
     } else if (request->response_headers_length + needed >= request->response_headers_capacity) {
         // Realloc to larger size
         size_t new_capacity = (request->response_headers_capacity + needed) * 2;
-        char* new_buffer = realloc(request->response_headers, new_capacity);
+        char* new_buffer = heap_caps_realloc(request->response_headers, new_capacity, MALLOC_CAP_SPIRAM);
         if (!new_buffer) return -1;
         request->response_headers = new_buffer;
         request->response_headers_capacity = new_capacity;
@@ -887,19 +885,19 @@ NativeSymbol mcp_core_host_functions[] = {
     {"free", mcp_native_free, "(i)", NULL},
     
     // String functions - using automatic string conversion ($)
-    {"strlen", mcp_native_strlen, "($)i", NULL},
-    {"strcmp", mcp_native_strcmp, "($$)i", NULL},
-    {"strcpy", mcp_native_strcpy, "($$)i", NULL},
-    {"strcat", mcp_native_strcat, "(**)i", NULL},
-    {"strncpy", mcp_native_strncpy, "($*i)i", NULL},
-    {"strstr", mcp_native_strstr, "($$)i", NULL},
-    {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
+    // {"strlen", mcp_native_strlen, "($)i", NULL},
+    // {"strcmp", mcp_native_strcmp, "($$)i", NULL},
+    // {"strcpy", mcp_native_strcpy, "($$)i", NULL},
+    // {"strcat", mcp_native_strcat, "($$)i", NULL},
+    // {"strncpy", mcp_native_strncpy, "($*i)i", NULL},
+    // {"strstr", mcp_native_strstr, "($$)i", NULL},
+    // {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
 
-    {"atoi", mcp_native_atoi, "($)i", NULL},
+    // {"atoi", mcp_native_atoi, "($)i", NULL},
     
     // Memory functions
-    {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
-    {"memcmp", mcp_native_memcmp, "(**i)i", NULL},
+    // {"memcpy", mcp_native_memcpy, "(**i)i", NULL},
+    // {"memcmp", mcp_native_memcmp, "(**i)i", NULL},
     
     
     // Logging functions

@@ -281,18 +281,23 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     }
     
     // Log the tool count to debug missing 4th tool
-    char count_msg[64];
-    snprintf(count_msg, sizeof(count_msg), "handle_tools_list: g_tool_count = %d", g_tool_count);
-    log_info("MCP", count_msg);
+    // char count_msg[64];
+    // snprintf(count_msg, sizeof(count_msg), "handle_tools_list: g_tool_count = %d", g_tool_count);
+    // log_info("MCP", count_msg);
     
-    // Use the response buffer directly to avoid large stack allocation
-    strcpy(response, "{\"tools\":[");
+    // Use snprintf with position tracking instead of strcat
+
+    char tools_result[2048];
+    int pos = 0;
+    int written = snprintf(tools_result, sizeof(tools_result), "{\"tools\":[");
+    if (written < 0 || written >= sizeof(tools_result)) {
+        return create_jsonrpc_error(-32000, "Response buffer too small", response, max_len);
+    }
+    pos = written;
     
     for (int i = 0; i < g_tool_count; i++) {
-        char tool_json[1024];  // Increased size for full schemas
-        
-        // Use the input_schema from the tool registration - no more hardcoding!
-        snprintf(tool_json, sizeof(tool_json),
+        // Build tool JSON directly into response buffer
+        written = snprintf(tools_result + pos, sizeof(tools_result) - pos,
             "%s{\"name\":\"%s\",\"title\":\"%s\",\"description\":\"%s\","
             "\"inputSchema\":%s}",
             i > 0 ? "," : "", 
@@ -301,17 +306,21 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
             g_tools[i].description,
             g_tools[i].input_schema);
         
-        // Check if we have space before adding
-        if (strlen(response) + strlen(tool_json) + 3 < max_len) {
-            strcat(response, tool_json);
+        if (written < 0 || written >= max_len - pos) {
+            return create_jsonrpc_error(-32000, "Tool list too large for buffer", response, max_len);
         }
+        pos += written;
     }
     
-    strcat(response, "]}");
+    // Close JSON array and object
+    written = snprintf(tools_result + pos, sizeof(tools_result) - pos, "]}");
+    if (written < 0 || written >= sizeof(tools_result) - pos) {
+        return create_jsonrpc_error(-32000, "Response buffer overflow", response, max_len);
+    }
     
     // Wrap in JSON-RPC response with correct ID
-    char tools_result[2048];
-    strcpy(tools_result, response);
+    
+    //strcpy(tools_result, response);
     
     int len = snprintf(response, max_len,
         "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":%d}",

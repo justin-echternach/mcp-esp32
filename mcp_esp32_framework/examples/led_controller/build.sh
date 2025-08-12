@@ -11,7 +11,7 @@ echo "Building LED controller example..."
 # Use the framework build tool
 "$FRAMEWORK_ROOT/tools/build_wasm.sh" \
     -s "$FRAMEWORK_ROOT/wasm_sdk" \
-    -o led_controller \
+    -o led_ctrl \
     -v \
     "$SCRIPT_DIR/led_controller.c"
 

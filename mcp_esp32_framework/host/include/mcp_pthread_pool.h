@@ -17,7 +17,7 @@ typedef struct {
     size_t request_len;
     char* uri;
     char* headers;
-    char response[2048];
+    char* response;
     
     // Response headers management
     char* response_headers;
