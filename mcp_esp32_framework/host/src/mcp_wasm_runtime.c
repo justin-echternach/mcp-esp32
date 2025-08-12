@@ -336,6 +336,8 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     ESP_LOGI(TAG, "Successfully loaded MCP WASM module: %s -> %s", route, wasm_filename);
     ESP_LOGI(TAG, "Memory after successful MCP module load: free=%zu bytes, largest_block=%zu bytes", 
              heap_caps_get_free_size(MALLOC_CAP_8BIT), heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+    mcp_memory_stats();
     
     // CRITICAL: Call _start() function to initialize the module and register tools
     ESP_LOGI(TAG, "🔍 DEBUG: Looking for _start function to initialize module");
@@ -384,7 +386,9 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     
     ESP_LOGI(TAG, "🔍 DEBUG: Returning module ptr: %p (array index: %d)", 
              module, (int)(module - g_mcp_modules));
-    
+
+    mcp_memory_stats();
+
     return module;
 }
 
@@ -413,6 +417,7 @@ void mcp_wasm_registry_stats(int* loaded_count, int* max_count) {
     if (loaded_count) *loaded_count = g_mcp_module_count;
     if (max_count) *max_count = 8;
     pthread_mutex_unlock(&g_mcp_modules_mutex);
+    mcp_memory_stats();
 }
 
 void mcp_wasm_registry_cleanup(void) {

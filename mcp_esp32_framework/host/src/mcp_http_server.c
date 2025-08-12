@@ -1,4 +1,5 @@
 #include "mcp_http_server.h"
+#include "mcp_memory.h"
 #include "mcp_session_manager.h"
 #include "esp_log.h"
 #include <string.h>
@@ -85,7 +86,7 @@ esp_err_t mcp_http_register_mcp_endpoints(httpd_handle_t server,
         const mcp_route_config_t* route = &mcp_config->routes[i];
         
         // Register POST handler for MCP requests
-        httpd_uri_t* mcp_post = malloc(sizeof(httpd_uri_t));
+        httpd_uri_t* mcp_post = mcp_malloc(sizeof(httpd_uri_t));
         if (!mcp_post) {
             ESP_LOGE(TAG, "Failed to allocate memory for MCP POST handler");
             return ESP_ERR_NO_MEM;
@@ -94,7 +95,7 @@ esp_err_t mcp_http_register_mcp_endpoints(httpd_handle_t server,
         mcp_post->uri = strdup(route->route);
         if (!mcp_post->uri) {
             ESP_LOGE(TAG, "Failed to allocate memory for route URI");
-            free(mcp_post);
+            mcp_free(mcp_post);
             return ESP_ERR_NO_MEM;
         }
         
@@ -106,13 +107,13 @@ esp_err_t mcp_http_register_mcp_endpoints(httpd_handle_t server,
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to register MCP POST handler for %s: %s", 
                      route->route, esp_err_to_name(ret));
-            free((void*)mcp_post->uri);
-            free(mcp_post);
+            mcp_free((void*)mcp_post->uri);
+            mcp_free(mcp_post);
             return ret;
         }
         
         // Register OPTIONS handler for CORS preflight
-        httpd_uri_t* mcp_options = malloc(sizeof(httpd_uri_t));
+        httpd_uri_t* mcp_options = mcp_malloc(sizeof(httpd_uri_t));
         if (!mcp_options) {
             ESP_LOGE(TAG, "Failed to allocate memory for MCP OPTIONS handler");
             return ESP_ERR_NO_MEM;
@@ -121,7 +122,7 @@ esp_err_t mcp_http_register_mcp_endpoints(httpd_handle_t server,
         mcp_options->uri = strdup(route->route);
         if (!mcp_options->uri) {
             ESP_LOGE(TAG, "Failed to allocate memory for OPTIONS route URI");
-            free(mcp_options);
+            mcp_free(mcp_options);
             return ESP_ERR_NO_MEM;
         }
         
@@ -133,8 +134,8 @@ esp_err_t mcp_http_register_mcp_endpoints(httpd_handle_t server,
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to register MCP OPTIONS handler for %s: %s", 
                      route->route, esp_err_to_name(ret));
-            free((void*)mcp_options->uri);
-            free(mcp_options);
+            mcp_free((void*)mcp_options->uri);
+            mcp_free(mcp_options);
             return ret;
         }
         
@@ -203,7 +204,9 @@ esp_err_t mcp_http_health_handler(httpd_req_t *req) {
     if (ret != ESP_OK) {
         return ret;
     }
-    
+
+    mcp_memory_stats();
+
     return httpd_resp_send(req, health_response, strlen(health_response));
 }
 

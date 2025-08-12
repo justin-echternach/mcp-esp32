@@ -336,8 +336,8 @@ size_t mcp_get_largest_free_psram_block(void)
 
 void mcp_memory_stats(void)
 {
-    size_t dram_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
-    size_t dram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    size_t dram_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t dram_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
 
     ESP_LOGI(TAG, "=== MCP Memory Statistics ===");
     ESP_LOGI(TAG, "DRAM: Free=%zu KB, Largest Block=%zu KB", dram_free / 1024, dram_largest / 1024);

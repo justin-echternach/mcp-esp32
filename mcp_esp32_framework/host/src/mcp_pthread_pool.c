@@ -357,6 +357,8 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
     // this is here for debugging wasm func export table corruption after response is written to
     mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
 
+    mcp_memory_stats();
+
     wasm_runtime_module_free(module->wasm_module_inst, request_wasm_buffer);
     wasm_runtime_module_free(module->wasm_module_inst, response_wasm_buffer);
 

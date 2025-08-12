@@ -45,11 +45,7 @@
 #include "esp_netif.h"
 #include "lwip/inet.h"
 
-#define LED_GPIO GPIO_NUM_5
-#define BLINK_PERIOD_MS 1000
-#define IWASM_MAIN_STACK_SIZE 8192
-
-static const char *TAG = "led-wamr";
+static const char *TAG = "mcp-wamr";
 
 // WiFi Configuration
 #define WIFI_SSID      "your-ssid"
@@ -64,7 +60,7 @@ EventGroupHandle_t g_wifi_event_group;
 int g_s_retry_num = 0;
 const int g_wifi_connected_bit = BIT0;
 int g_wifi_maximum_retry = WIFI_MAXIMUM_RETRY;
-const char* g_wifi_tag = "led-wamr";
+const char* g_wifi_tag = "mcp-wamr";
 
 // SSE client tracking
 #define MAX_SSE_CLIENTS 4
