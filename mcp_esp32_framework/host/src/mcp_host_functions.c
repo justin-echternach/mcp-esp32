@@ -86,6 +86,24 @@ uint32_t mcp_native_malloc(wasm_exec_env_t exec_env, uint32_t size) {
     return wasm_addr;
 }
 
+// uint32_t mcp_native_malloc(wasm_exec_env_t exec_env, uint32_t size) {
+//     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+//     if (size == 0 || size > 64 * 1024) { // Reasonable size limit
+//         ESP_LOGE(TAG, "Invalid malloc size: %u", size);
+//         return 0;
+//     }
+
+//     void * native_addr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM);
+//     if (native_addr == 0) {
+//         ESP_LOGE(TAG, "WASM malloc failed for size %u", size);
+//     }
+
+//     uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, native_addr);
+    
+//     return wasm_addr;
+// }
+
 void mcp_native_free(wasm_exec_env_t exec_env, uint32_t ptr) {
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
     
@@ -95,6 +113,18 @@ void mcp_native_free(wasm_exec_env_t exec_env, uint32_t ptr) {
     
     wasm_runtime_module_free(module_inst, ptr);
 }
+
+// void mcp_native_free(wasm_exec_env_t exec_env, uint32_t ptr) {
+//     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
+    
+//     if (ptr == 0) {
+//         return; // Nothing to free
+//     }
+
+//     void * native_addr = wasm_runtime_addr_app_to_native(module_inst, ptr);
+
+//     heap_caps_free(native_addr);
+// }
 
 // ========== String Functions ==========
 

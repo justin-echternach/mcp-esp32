@@ -15,8 +15,8 @@ typedef struct {
     wasm_module_t module;
     wasm_module_inst_t module_inst;
     wasm_exec_env_t exec_env;
-    uint8_t *wasm_file_buf;
-    uint32_t wasm_file_size;
+    // uint8_t *wasm_file_buf;
+    // uint32_t wasm_file_size;
     char error_buf[256];
 } mcp_wasm_runtime_t;
 

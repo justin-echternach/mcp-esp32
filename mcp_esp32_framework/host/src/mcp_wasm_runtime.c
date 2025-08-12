@@ -53,66 +53,66 @@ bool mcp_wasm_runtime_full_init(RuntimeInitArgs *init_args) {
 }
 
 // Load WASM module from file
-bool mcp_wasm_load_module_from_file(mcp_wasm_runtime_t *runtime, 
-                                    const char *filename) {
-    if (!runtime || !filename) {
-        ESP_LOGE(TAG, "Invalid parameters");
-        return false;
-    }
+// bool mcp_wasm_load_module_from_file(mcp_wasm_runtime_t *runtime, 
+//                                     const char *filename) {
+//     if (!runtime || !filename) {
+//         ESP_LOGE(TAG, "Invalid parameters");
+//         return false;
+//     }
     
-    // Open file
-    FILE *file = fopen(filename, "rb");
-    if (!file) {
-        ESP_LOGE(TAG, "Failed to open file: %s", filename);
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Failed to open file: %s", filename);
-        return false;
-    }
+//     // Open file
+//     FILE *file = fopen(filename, "rb");
+//     if (!file) {
+//         ESP_LOGE(TAG, "Failed to open file: %s", filename);
+//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
+//                  "Failed to open file: %s", filename);
+//         return false;
+//     }
     
-    // Get file size
-    fseek(file, 0, SEEK_END);
-    runtime->wasm_file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
+//     // Get file size
+//     fseek(file, 0, SEEK_END);
+//     runtime->wasm_file_size = ftell(file);
+//     fseek(file, 0, SEEK_SET);
     
-    // Allocate buffer
-    runtime->wasm_file_buf = malloc(runtime->wasm_file_size);
-    if (!runtime->wasm_file_buf) {
-        ESP_LOGE(TAG, "Failed to allocate memory for WASM file");
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Failed to allocate memory for WASM file");
-        fclose(file);
-        return false;
-    }
+//     // Allocate buffer
+//     runtime->wasm_file_buf = malloc(runtime->wasm_file_size);
+//     if (!runtime->wasm_file_buf) {
+//         ESP_LOGE(TAG, "Failed to allocate memory for WASM file");
+//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
+//                  "Failed to allocate memory for WASM file");
+//         fclose(file);
+//         return false;
+//     }
     
-    // Read file
-    size_t read_size = fread(runtime->wasm_file_buf, 1, runtime->wasm_file_size, file);
-    fclose(file);
+//     // Read file
+//     size_t read_size = fread(runtime->wasm_file_buf, 1, runtime->wasm_file_size, file);
+//     fclose(file);
     
-    if (read_size != runtime->wasm_file_size) {
-        ESP_LOGE(TAG, "Failed to read WASM file");
-        snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
-                 "Failed to read WASM file");
-        free(runtime->wasm_file_buf);
-        runtime->wasm_file_buf = NULL;
-        return false;
-    }
+//     if (read_size != runtime->wasm_file_size) {
+//         ESP_LOGE(TAG, "Failed to read WASM file");
+//         snprintf(runtime->error_buf, sizeof(runtime->error_buf), 
+//                  "Failed to read WASM file");
+//         free(runtime->wasm_file_buf);
+//         runtime->wasm_file_buf = NULL;
+//         return false;
+//     }
     
-    // Load WASM module
-    runtime->module = wasm_runtime_load(runtime->wasm_file_buf, 
-                                       runtime->wasm_file_size, 
-                                       runtime->error_buf, 
-                                       sizeof(runtime->error_buf));
+//     // Load WASM module
+//     runtime->module = wasm_runtime_load(runtime->wasm_file_buf, 
+//                                        runtime->wasm_file_size, 
+//                                        runtime->error_buf, 
+//                                        sizeof(runtime->error_buf));
     
-    if (!runtime->module) {
-        ESP_LOGE(TAG, "Failed to load WASM module: %s", runtime->error_buf);
-        free(runtime->wasm_file_buf);
-        runtime->wasm_file_buf = NULL;
-        return false;
-    }
+//     if (!runtime->module) {
+//         ESP_LOGE(TAG, "Failed to load WASM module: %s", runtime->error_buf);
+//         free(runtime->wasm_file_buf);
+//         runtime->wasm_file_buf = NULL;
+//         return false;
+//     }
     
-    ESP_LOGI(TAG, "WASM module loaded successfully from %s", filename);
-    return true;
-}
+//     ESP_LOGI(TAG, "WASM module loaded successfully from %s", filename);
+//     return true;
+// }
 
 // Register native host functions
 bool mcp_wasm_register_natives(const char *module_name,
@@ -239,10 +239,10 @@ void mcp_wasm_runtime_cleanup(mcp_wasm_runtime_t *runtime) {
     }
     
     // Free WASM file buffer
-    if (runtime->wasm_file_buf) {
-        free(runtime->wasm_file_buf);
-        runtime->wasm_file_buf = NULL;
-    }
+    // if (runtime->wasm_file_buf) {
+    //     free(runtime->wasm_file_buf);
+    //     runtime->wasm_file_buf = NULL;
+    // }
     
     // Destroy WASM runtime
     wasm_runtime_destroy();
@@ -497,7 +497,8 @@ void mcp_wasm_dump_exports(wasm_module_t module, const char* module_name) {
 extern mcp_config_t g_mcp_config;
 
 // MCP module registry globals
-static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
+//static mcp_wasm_module_t g_mcp_modules[8]; // Max 8 MCP modules
+static mcp_wasm_module_t *g_mcp_modules = NULL;
 static int g_mcp_module_count = 0;
 static pthread_mutex_t g_mcp_modules_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_registry_initialized = false;
@@ -511,7 +512,8 @@ bool mcp_wasm_registry_init(void) {
     pthread_mutex_lock(&g_mcp_modules_mutex);
     
     // Initialize all modules to empty state
-    memset(g_mcp_modules, 0, sizeof(g_mcp_modules));
+    //memset(g_mcp_modules, 0, sizeof(g_mcp_modules));
+    g_mcp_modules = heap_caps_malloc(sizeof(mcp_wasm_module_t) * 8, MALLOC_CAP_SPIRAM);
     g_mcp_module_count = 0;
     g_registry_initialized = true;
     
@@ -580,7 +582,11 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
 #endif
     
     // Allocate buffer - use smaller heap size to save memory
-    uint8_t *wasm_file_buf = malloc(file_size);
+    uint8_t *wasm_file_buf = heap_caps_malloc(file_size, MALLOC_CAP_8BIT);
+    module->wasm_file_buf = wasm_file_buf; // this is crucial ... WAMR uses this buffer and it needs to stay around while the module is loaded
+    module->wasm_file_size = file_size;
+
+    //uint8_t *wasm_file_buf = heap_caps_aligned_alloc(4, file_size, MALLOC_CAP_SPIRAM);
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
 #ifdef CONFIG_SPIRAM
@@ -602,7 +608,7 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     
     if (bytes_read != file_size) {
         ESP_LOGE(TAG, "Failed to read WASM file completely");
-        free(wasm_file_buf);
+        heap_caps_free(wasm_file_buf);
         pthread_mutex_unlock(&g_mcp_modules_mutex);
         return NULL;
     }
@@ -700,7 +706,7 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     //     ESP_LOGI(TAG, "❌ String not found before OR after wasm_runtime_load");
     // }
     
-    free(wasm_file_buf);
+    //heap_caps_free(wasm_file_buf);
     
     if (!module->wasm_module) {
         ESP_LOGE(TAG, "Failed to load WASM module %s: %s", wasm_filename, error_buf);
