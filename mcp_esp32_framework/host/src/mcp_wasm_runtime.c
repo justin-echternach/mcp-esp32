@@ -846,6 +846,11 @@ void mcp_wasm_registry_cleanup(void) {
             if (g_mcp_modules[i].wasm_module) {
                 wasm_runtime_unload(g_mcp_modules[i].wasm_module);
             }
+            if (g_mcp_modules[i].wasm_file_buf) {
+                heap_caps_free(g_mcp_modules[i].wasm_file_buf);
+                g_mcp_modules[i].wasm_file_buf = NULL;
+                g_mcp_modules[i].wasm_file_size = 0;
+            }
         }
     }
     
