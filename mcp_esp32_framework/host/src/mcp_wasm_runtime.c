@@ -582,11 +582,14 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
 #endif
     
     // Allocate buffer - use smaller heap size to save memory
-    uint8_t *wasm_file_buf = heap_caps_malloc(file_size, MALLOC_CAP_8BIT);
+    //uint8_t *wasm_file_buf = heap_caps_malloc(file_size, MALLOC_CAP_8BIT);
+    uint8_t *wasm_file_buf = heap_caps_aligned_alloc(4, file_size, MALLOC_CAP_SPIRAM); // this meets the 4 byte alignment requirement for AOT and allows us to use psram
     module->wasm_file_buf = wasm_file_buf; // this is crucial ... WAMR uses this buffer and it needs to stay around while the module is loaded
     module->wasm_file_size = file_size;
 
-    //uint8_t *wasm_file_buf = heap_caps_aligned_alloc(4, file_size, MALLOC_CAP_SPIRAM);
+    ESP_LOGI(TAG, "Allocated %ld bytes for WASM file buffer at %p", file_size, wasm_file_buf);
+
+    
     if (!wasm_file_buf) {
         ESP_LOGE(TAG, "Failed to allocate memory for WASM file (%ld bytes)", file_size);
 #ifdef CONFIG_SPIRAM
