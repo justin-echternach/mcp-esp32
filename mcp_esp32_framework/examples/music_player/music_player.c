@@ -149,15 +149,29 @@ mcp_result_t play_note_handler(const char* params) {
         return mcp_error(-3, "Volume must be between 0 and 100");
     }
     
+    // Start I2S for single note
+    if (i2s_start() != 0) {
+        return mcp_error(-4, "Failed to start I2S");
+    }
+    
     // Play the note
     mcp_result_t result = play_single_note(note, duration, volume);
     if (result.code != 0) {
+        i2s_stop();  // Stop I2S on error
         return result;
     }
     
+    // Wait for note to complete (simple blocking)
+    for (volatile int i = 0; i < duration * 100; i++) {
+        // ~10us per iteration, so duration * 100 ≈ duration in ms
+    }
+    
+    // Stop I2S after note completes
+    i2s_stop();
+    
     // Create human-readable success response
     snprintf(result_json, sizeof(result_json),
-        "Playing note %s for %dms at volume %d%% via I2S audio",
+        "Played note %s for %dms at volume %d%% via I2S audio",
         note, duration, volume);
     
     return mcp_success(result_json);
@@ -186,10 +200,16 @@ mcp_result_t play_melody_handler(const char* params) {
     
     log_info("MUSIC", "Starting melody playback");
     
+    // Start I2S once for entire melody
+    if (i2s_start() != 0) {
+        return mcp_error(-4, "Failed to start I2S for melody");
+    }
+    
     // Parse and play melody sequentially
     char* melody_copy = malloc(strlen(melody) + 1);
     if (!melody_copy) {
-        return mcp_error(-4, "Failed to allocate memory for melody parsing");
+        i2s_stop();  // Stop I2S if we fail
+        return mcp_error(-5, "Failed to allocate memory for melody parsing");
     }
     strcpy(melody_copy, melody);
     
@@ -219,6 +239,7 @@ mcp_result_t play_melody_handler(const char* params) {
                 mcp_result_t note_result = play_single_note(note_name, duration, volume);
                 if (note_result.code != 0) {
                     free(melody_copy);
+                    i2s_stop();  // Stop I2S on error
                     return note_result;  // Return error from note playback
                 }
                 
@@ -240,7 +261,8 @@ mcp_result_t play_melody_handler(const char* params) {
             } else {
                 log_error("MUSIC", "Failed to parse note");
                 free(melody_copy);
-                return mcp_error(-5, "Invalid note format in melody");
+                i2s_stop();  // Stop I2S on error
+                return mcp_error(-6, "Invalid note format in melody");
             }
         }
         
@@ -253,6 +275,9 @@ mcp_result_t play_melody_handler(const char* params) {
     }
     
     free(melody_copy);
+    
+    // Stop I2S after melody completes
+    i2s_stop();
     is_playing = false;
     
     snprintf(result_json, sizeof(result_json),
@@ -271,11 +296,49 @@ mcp_result_t stop_music_handler(const char* params) {
     // Stop I2S playback if playing
     if (is_playing) {
         i2s_stop_tone();
+        i2s_stop();  // Stop I2S clock generation
         is_playing = false;
     }
     
     snprintf(result_json, sizeof(result_json),
         "Music playback stopped via I2S audio");
+    
+    return mcp_success(result_json);
+}
+
+// Tool: test_tone - Generate continuous test tone for oscilloscope debugging
+mcp_result_t test_tone_handler(const char* params) {
+    int frequency = 1000;  // Default 1kHz
+    int volume = 50;       // Default 50%
+    char result_json[256];
+    
+    log_info("MUSIC", "test_tone_handler called");
+    
+    // Optional frequency parameter
+    mcp_parse_int_param(params, "frequency", &frequency);
+    mcp_parse_int_param(params, "volume", &volume);
+    
+    // Validate
+    if (frequency < 100 || frequency > 5000) {
+        return mcp_error(-1, "Frequency must be between 100 and 5000 Hz");
+    }
+    
+    // Start I2S for test tone
+    if (i2s_start() != 0) {
+        return mcp_error(-2, "Failed to start I2S for test tone");
+    }
+    
+    // Play continuous tone (duration = 0 means continuous)
+    if (i2s_play_tone(frequency, 0, volume) != 0) {
+        i2s_stop();
+        return mcp_error(-3, "Failed to start test tone");
+    }
+    
+    is_playing = true;
+    
+    snprintf(result_json, sizeof(result_json),
+        "Playing continuous %d Hz test tone at %d%% volume. Use stop_music to stop.",
+        frequency, volume);
     
     return mcp_success(result_json);
 }
@@ -394,6 +457,12 @@ static mcp_tool_t music_tools[] = {
         .description = "Set playback volume (0-100)",
         .input_schema = "{\"type\":\"object\",\"properties\":{\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"volume\"]}",
         .handler = set_volume_handler
+    },
+    {
+        .name = "test_tone",
+        .description = "Generate continuous test tone for debugging (oscilloscope testing)",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"frequency\":{\"type\":\"integer\",\"description\":\"Test frequency in Hz (100-5000)\",\"minimum\":100,\"maximum\":5000},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}}}",
+        .handler = test_tone_handler
     }
 };
 

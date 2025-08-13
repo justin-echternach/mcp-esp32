@@ -85,6 +85,8 @@ extern int32_t pwm_set_frequency(int32_t pin, int32_t frequency);
 // I2S Audio Control (high-quality audio output)
 extern int32_t i2s_init(int32_t sample_rate, int32_t bits_per_sample);
 extern int32_t i2s_deinit(void);
+extern int32_t i2s_start(void);  // Start I2S clock generation
+extern int32_t i2s_stop(void);   // Stop I2S clock generation
 extern int32_t i2s_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
 extern int32_t i2s_stop_tone(void);
 extern int32_t i2s_set_volume(int32_t volume_percent);

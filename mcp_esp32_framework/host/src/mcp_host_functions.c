@@ -1087,9 +1087,50 @@ int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t b
     i2s_initialized = true;
     i2s_playing = false;
     
-    ESP_LOGI(TAG, "I2S initialized: %dHz, %d-bit, pins BCK=%d WS=%d DATA=%d", 
+    // Stop I2S immediately after initialization to prevent continuous clock
+    // It will be started when actually playing audio
+    esp_err_t stop_ret = i2s_stop(I2S_NUM_0);
+    if (stop_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to stop I2S after init: %s", esp_err_to_name(stop_ret));
+    }
+    
+    ESP_LOGI(TAG, "I2S initialized and stopped: %dHz, %d-bit, pins BCK=%d WS=%d DATA=%d", 
              sample_rate, bits_per_sample, I2S_BCK_PIN, I2S_WS_PIN, I2S_DATA_PIN);
     
+    return 0;
+}
+
+// Start I2S peripheral (begin clock generation)
+int32_t native_i2s_start(wasm_exec_env_t exec_env) {
+    if (!i2s_initialized) {
+        ESP_LOGE(TAG, "I2S not initialized");
+        return -1;
+    }
+    
+    esp_err_t ret = i2s_start(I2S_NUM_0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start I2S: %s", esp_err_to_name(ret));
+        return -2;
+    }
+    
+    ESP_LOGD(TAG, "I2S started");
+    return 0;
+}
+
+// Stop I2S peripheral (stop clock generation)  
+int32_t native_i2s_stop(wasm_exec_env_t exec_env) {
+    if (!i2s_initialized) {
+        ESP_LOGE(TAG, "I2S not initialized");
+        return -1;
+    }
+    
+    esp_err_t ret = i2s_stop(I2S_NUM_0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to stop I2S: %s", esp_err_to_name(ret));
+        return -2;
+    }
+    
+    ESP_LOGD(TAG, "I2S stopped");
     return 0;
 }
 
@@ -1271,6 +1312,8 @@ NativeSymbol mcp_core_host_functions[] = {
     // I2S Audio Control (for high-quality audio output)
     {"i2s_init", native_i2s_init, "(ii)i", NULL},
     {"i2s_deinit", native_i2s_deinit, "()i", NULL},
+    {"i2s_start", native_i2s_start, "()i", NULL},
+    {"i2s_stop", native_i2s_stop, "()i", NULL},
     {"i2s_play_tone", native_i2s_play_tone, "(iii)i", NULL},
     {"i2s_stop_tone", native_i2s_stop_tone, "()i", NULL},
     {"i2s_set_volume", native_i2s_set_volume, "(i)i", NULL},
