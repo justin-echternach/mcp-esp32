@@ -1034,6 +1034,14 @@ int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t b
     if (ret != ESP_OK) {
         return -3;
     }
+
+    gpio_set_drive_capability(GPIO_NUM_27, GPIO_DRIVE_CAP_0);  // 5mA (weakest)
+    gpio_set_drive_capability(GPIO_NUM_26, GPIO_DRIVE_CAP_0);  // 5mA
+    gpio_set_drive_capability(GPIO_NUM_25, GPIO_DRIVE_CAP_0);  // 5mA
+
+    gpio_pulldown_en(GPIO_NUM_27);
+    gpio_pulldown_en(GPIO_NUM_26);
+    gpio_pulldown_en(GPIO_NUM_25);
     
     // Configure I2S
     i2s_config_t i2s_config = {
