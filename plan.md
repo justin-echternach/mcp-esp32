@@ -1,204 +1,182 @@
-# MCP LED Controller Implementation Plan
+Implementation Plan: DMA Event Queue + IRAM Functions Solution
 
-## Current Status ✅
-- **PSRAM Integration**: Successfully enabled 4MB PSRAM, eliminated memory constraints
-- **Basic MCP Framework**: Working JSON-RPC request parsing and routing
-- **WASM Runtime**: WASM modules loading and executing in pthread context
-- **SDK Foundation**: Basic MCP SDK structure with tool registration system
+  Overview
 
-## Goal 🎯
-Create a complete MCP implementation where an LLM can control ESP32 LEDs through standardized MCP tools/calls.
+  Create a parallel implementation alongside the existing task-based approach, selectable via a parameter or compile-time flag.
 
-## Implementation Plan
+  Phase 1: Infrastructure Setup
 
-### Phase 1: Fix Core MCP Request Handling 🔧
-**Current Issue**: `handle_mcp_request` only returns parsed method, doesn't handle full MCP flow
+  1.1 Add Configuration Flag
 
-**Tasks**:
-1. **Update handle_mcp_request function** in `example_led_controller.c`
-   - Replace simple method return with full `mcp_handle_request()` call
-   - Ensure proper JSON-RPC response format
-   - Handle error cases appropriately
+  File: mcp_host_functions.c
+  - Add enum for audio mode selection:
+  typedef enum {
+      I2S_MODE_TASK = 0,      // Current implementation
+      I2S_MODE_DMA_EVENT = 1  // New DMA event-driven
+  } i2s_audio_mode_t;
+  - Add static variable to track mode
+  - Modify native_i2s_init() to accept mode parameter
 
-2. **Test tools/list method**
-   - Verify tools are properly registered and returned
-   - Ensure JSON-RPC format compliance
-   - Test with curl command
+  1.2 Create IRAM Section Definitions
 
-### Phase 2: Complete tools/call Implementation 🛠️
-**Tasks**:
-1. **Enhance tools/call handling** in `mcp_sdk.c`
-   - Fix parameter parsing for nested JSON structures
-   - Improve error handling and validation
-   - Add proper JSON-RPC response wrapping
+  File: mcp_host_functions.c or new mcp_audio_iram.c
+  - Define IRAM_ATTR functions for critical audio generation
+  - Separate sine table access functions marked for IRAM
+  - Create DRAM_ATTR for data that must be in internal RAM
 
-2. **Test LED control tools**:
-   - `control_led`: Set LED on/off with pin and state parameters
-   - `get_led_status`: Read current LED state
-   - `toggle_led`: Toggle LED state
-   - `get_system_info`: System diagnostics
+  Phase 2: DMA Event Queue Implementation
 
-### Phase 3: JSON-RPC Compliance & Schema 📋
-**Based on MCP patterns and JSON-RPC 2.0**:
+  2.1 Modify I2S Initialization
 
-**tools/list Request**:
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/list",
-  "id": 1
-}
-```
+  Location: native_i2s_init()
+  - When in DMA_EVENT mode:
+    - Create I2S event queue during i2s_driver_install()
+    - Increase DMA descriptors for smoother operation
+    - Configure for optimal buffer sizes (power of 2)
 
-**tools/list Response**:
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "tools": [
-      {
-        "name": "control_led",
-        "description": "Control LED state on specified GPIO pin",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "pin": {"type": "number", "description": "GPIO pin number (0-39)"},
-            "state": {"type": "number", "description": "LED state (0=off, 1=on)"}
-          },
-          "required": ["pin", "state"]
-        }
-      }
-    ]
-  },
-  "id": 1
-}
-```
+  2.2 Create Event Queue Handler Task
 
-**tools/call Request**:
-```json
-{
-  "jsonrpc": "2.0",
-  "method": "tools/call",
-  "params": {
-    "name": "control_led",
-    "arguments": {
-      "pin": 2,
-      "state": 1
-    }
-  },
-  "id": 2
-}
-```
+  New Function: i2s_event_queue_task()
+  - Higher priority than current (24-25)
+  - Smaller stack (4KB)
+  - Pinned to Core 1
+  - Monitors I2S event queue
+  - Handles I2S_EVENT_TX_DONE events
 
-**tools/call Response**:
-```json
-{
-  "jsonrpc": "2.0",
-  "result": {
-    "content": [
-      {
-        "type": "text",
-        "text": "LED on pin 2 turned ON successfully"
-      }
-    ]
-  },
-  "id": 2
-}
-```
+  2.3 Create IRAM Audio Generation Functions
 
-### Phase 4: Host Function Integration 🔗
-**Tasks**:
-1. **Verify host function imports** are working:
-   - `gpio_set_level`, `gpio_get_level`, `gpio_set_direction`
-   - `json_parse_request`, `json_create_response`, `json_create_error`
-   - `log_info`, `log_error`
+  New Functions in IRAM:
+  - IRAM_ATTR generate_sine_samples() - Core sample generation
+  - IRAM_ATTR get_sine_value() - Table lookup
+  - IRAM_ATTR fill_dma_buffer() - Buffer filling routine
 
-2. **Add missing host functions** if needed:
-   - Pin protection checking
-   - System info functions
-   - SSE event sending
+  Phase 3: Memory Management
 
-### Phase 5: LLM Integration Testing 🤖
-**Test Scenarios**:
-1. **Direct curl testing**:
-   ```bash
-   # List available tools
-   curl -X POST http://192.168.100.109/mcp/led \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+  3.1 Pre-allocate Buffer Pool
 
-   # Turn LED on
-   curl -X POST http://192.168.100.109/mcp/led \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"control_led","arguments":{"pin":2,"state":1}},"id":2}'
-   ```
+  Location: native_i2s_init() or first tone play
+  - Allocate 4-6 DMA-capable buffers
+  - Use circular buffer management
+  - All buffers in DMA-capable memory (MALLOC_CAP_DMA)
 
-2. **MCP Client Integration**:
-   - Test with Claude Desktop or other MCP-compatible clients
-   - Verify tool discovery and execution
-   - Test error handling and edge cases
+  3.2 Move Critical Data to DRAM
 
-### Phase 6: Production Readiness 🚀
-**Tasks**:
-1. **Error Handling & Validation**:
-   - GPIO pin range validation (0-39)
-   - Pin protection checks
-   - State validation (0/1)
-   - JSON parsing error recovery
+  Data to Move:
+  - Sine table → DRAM_ATTR
+  - Phase accumulator → DRAM_ATTR
+  - Current frequency → DRAM_ATTR
+  - Buffer pointers → DRAM_ATTR
 
-2. **Performance & Reliability**:
-   - Memory usage optimization
-   - Response time measurement
-   - Concurrent request handling
-   - WASM module lifecycle management
+  Phase 4: Interrupt and Timer Backup
 
-3. **Extended Tools**:
-   - PWM control for brightness
-   - Multiple LED patterns
-   - GPIO input reading
-   - System monitoring tools
+  4.1 Add Hardware Timer Backup
 
-## Current Code Issues to Fix
+  New Component: ESP Timer in ISR mode
+  - Create high-resolution timer
+  - Period = half DMA buffer duration
+  - IRAM_ATTR callback function
+  - Only activates if queue blocked
 
-### 1. handle_mcp_request Function
-**File**: `wasm_sdk/example_led_controller.c:201`
-**Issue**: Only returns parsed method, should handle full MCP request
-**Fix**: Replace with call to `mcp_handle_request()`
+  4.2 Configure Interrupt Priorities
 
-### 2. JSON Response Format  
-**Issue**: Not following JSON-RPC 2.0 format
-**Fix**: Update `json_create_response()` and `json_create_error()` functions
+  Location: During I2S and timer setup
+  - I2S interrupt: Level 3 (highest)
+  - Timer interrupt: Level 2
+  - Mask lower priority interrupts during critical sections
 
-### 3. Parameter Parsing
-**Issue**: Nested JSON parameter parsing incomplete
-**Fix**: Enhance `mcp_parse_string_param()` for complex JSON structures
+  Phase 5: Integration Points
 
-### 4. Tool Schema
-**Issue**: Missing `inputSchema` in tools/list response
-**Fix**: Add schema definitions to tool registration
+  5.1 Modify Play Tone Function
 
-## Success Criteria ✨
-- [ ] LLM can discover available LED tools via tools/list
-- [ ] LLM can turn LED on/off via tools/call
-- [ ] All responses follow JSON-RPC 2.0 format
-- [ ] Error handling works for invalid requests
-- [ ] Multiple tools work concurrently
-- [ ] Real-time LED control from LLM commands
+  Location: native_i2s_play_tone()
+  if (audio_mode == I2S_MODE_DMA_EVENT) {
+      // Start event queue task
+      // Prime DMA buffers
+      // Start I2S transmission
+  } else {
+      // Existing task-based approach
+  }
 
-## String Handling Documentation
-For comprehensive information about WASM string literals and host function string conversion, see:
-**[WAMR ESP32 String Handling Guide](./wamr-esp32-string-handling.md)**
+  5.2 Modify Stop Tone Function
 
-This document covers:
-- String literal corruption issues and solutions
-- Host function signature patterns (`$`, `*`, `~`)
-- Function name collision problems (e.g., `strcmp` → `wasm_strcmp`)
-- Memory layout configuration for WAMR
-- String handling best practices and debugging
+  Location: native_i2s_stop_tone()
+  - Handle both modes
+  - Properly clean up event queue task
+  - Ensure DMA buffers are cleared
 
-## Next Immediate Steps
-1. Apply WAMR build configuration fixes (memory layout exports)
-2. Test complete MCP flow with working string handling
-3. Implement tools/call with control_led functionality
-4. Verify LED actually turns on/off
-5. Create comprehensive test suite
+  Phase 6: Optimization and Testing
+
+  6.1 Add Performance Metrics
+
+  - Add counters for:
+    - DMA underruns
+    - Event queue delays
+    - Buffer fill times
+    - Interrupt latency
+
+  6.2 Create Mode Comparison Function
+
+  New Function: native_i2s_get_stats()
+  - Return performance metrics
+  - Allow runtime comparison
+
+  File Structure Changes
+
+  mcp_host_functions.c
+  ├── Existing task-based implementation (keep as-is)
+  ├── New DMA event mode flag/enum
+  ├── Modified init/play/stop functions with mode switch
+  └── Performance metrics collection
+
+  mcp_audio_iram.c (new file - optional)
+  ├── IRAM_ATTR audio generation functions
+  ├── IRAM_ATTR buffer management
+  ├── IRAM_ATTR sine table operations
+  └── Event queue task implementation
+
+  mcp_audio_dma.h (new file - optional)
+  ├── DMA buffer structures
+  ├── Event queue configuration
+  └── IRAM function declarations
+
+  Implementation Steps Order
+
+  1. Add mode selection infrastructure (minimal change)
+  2. Create IRAM functions (parallel development)
+  3. Implement event queue task (new code, no conflicts)
+  4. Integrate with existing play/stop (switch statement)
+  5. Add performance metrics (debugging/comparison)
+  6. Test both modes side-by-side
+  7. Optimize buffer sizes and priorities
+
+  Key Decision Points
+
+  1. Single file vs. multiple files
+    - Single: Easier to maintain, everything in one place
+    - Multiple: Cleaner separation, easier to conditionally compile
+  2. Runtime vs. compile-time selection
+    - Runtime: Easy A/B testing
+    - Compile-time: Smaller code size
+  3. Buffer pool size
+    - More buffers = smoother but more RAM
+    - Fewer buffers = less RAM but risk of underrun
+  4. Event queue size
+    - Larger = more tolerance for delays
+    - Smaller = faster response but risk of overflow
+
+  Testing Strategy
+
+  1. Phase 1: Ensure existing mode still works
+  2. Phase 2: Test DMA event mode with simple tones
+  3. Phase 3: Stress test with WiFi activity
+  4. Phase 4: Compare metrics between modes
+  5. Phase 5: Long duration stability test
+
+  Rollback Safety
+
+  - All changes are additive or behind mode flag
+  - Existing implementation untouched
+  - Can disable new mode via single flag
+  - Easy to remove if not improving performance
+
+  This plan allows incremental implementation while maintaining the working system, with clear comparison between approaches.
