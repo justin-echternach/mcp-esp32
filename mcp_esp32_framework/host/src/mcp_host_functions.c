@@ -1083,6 +1083,177 @@ static int16_t *sine_table = NULL;
 static float current_frequency = 0.0f;
 static double phase_accumulator = 0.0f;
 
+// ========== Envelope Support for Natural Sound ==========
+
+// Envelope Types
+typedef enum {
+    ENVELOPE_LINEAR = 0,      // Simple linear ramp
+    ENVELOPE_EXPONENTIAL = 1, // Natural exponential curve
+    ENVELOPE_COSINE = 2       // Smooth cosine curve
+} envelope_type_t;
+
+// Envelope Phases
+typedef enum {
+    ENVELOPE_IDLE = 0,
+    ENVELOPE_ATTACK = 1,
+    ENVELOPE_SUSTAIN = 2,
+    ENVELOPE_RELEASE = 3
+} envelope_phase_t;
+
+// Envelope State
+typedef struct {
+    envelope_type_t type;          // Type of envelope curve
+    uint32_t attack_samples;       // Attack duration in samples
+    uint32_t release_samples;      // Release duration in samples
+    float sustain_level;           // Sustain amplitude (0.0-1.0)
+    uint32_t current_sample;       // Current position in envelope
+    envelope_phase_t phase;        // Current envelope phase
+    uint32_t phase_start_sample;   // Sample count when phase started
+    float last_amplitude;          // Last calculated amplitude for smooth transitions
+    uint32_t total_samples;        // Total samples for the note (for auto-release)
+} envelope_state_t;
+
+// Global envelope state
+static envelope_state_t current_envelope = {
+    .type = ENVELOPE_EXPONENTIAL,
+    .attack_samples = 0,    // Will be initialized based on ms
+    .release_samples = 0,   // Will be initialized based on ms
+    .sustain_level = 0.9f,
+    .current_sample = 0,
+    .phase = ENVELOPE_IDLE,
+    .phase_start_sample = 0,
+    .last_amplitude = 0.0f,
+    .total_samples = 0
+};
+
+// Default envelope parameters (in milliseconds)
+#define DEFAULT_ATTACK_MS  20
+#define DEFAULT_RELEASE_MS 100
+#define DEFAULT_SUSTAIN_LEVEL 0.9f
+
+// Current envelope settings (can be changed via i2s_set_envelope)
+static uint32_t envelope_attack_ms = DEFAULT_ATTACK_MS;
+static uint32_t envelope_release_ms = DEFAULT_RELEASE_MS;
+
+// Calculate envelope amplitude for current sample
+static float calculate_envelope_amplitude(envelope_state_t *env) {
+    if (!env || env->phase == ENVELOPE_IDLE) {
+        return 0.0f;
+    }
+    
+    float amplitude = 0.0f;
+    uint32_t samples_in_phase = env->current_sample - env->phase_start_sample;
+    
+    switch (env->phase) {
+        case ENVELOPE_ATTACK:
+            if (env->attack_samples == 0) {
+                // Instant attack
+                amplitude = env->sustain_level;
+            } else {
+                switch (env->type) {
+                    case ENVELOPE_LINEAR:
+                        // Linear ramp from 0 to sustain_level
+                        amplitude = (float)samples_in_phase / (float)env->attack_samples * env->sustain_level;
+                        break;
+                    
+                    case ENVELOPE_EXPONENTIAL:
+                        // Exponential curve: 1 - e^(-5*t) gives ~99% at t=1
+                        float t = (float)samples_in_phase / (float)env->attack_samples;
+                        amplitude = env->sustain_level * (1.0f - expf(-5.0f * t));
+                        break;
+                    
+                    case ENVELOPE_COSINE:
+                        // Cosine curve for smooth attack
+                        float phase = (float)samples_in_phase / (float)env->attack_samples * M_PI;
+                        amplitude = env->sustain_level * (1.0f - cosf(phase)) * 0.5f;
+                        break;
+                }
+            }
+            
+            // Check if attack phase is complete
+            if (samples_in_phase >= env->attack_samples) {
+                env->phase = ENVELOPE_SUSTAIN;
+                env->phase_start_sample = env->current_sample;
+                amplitude = env->sustain_level;
+            }
+            break;
+        
+        case ENVELOPE_SUSTAIN:
+            amplitude = env->sustain_level;
+            
+            // Check if it's time to start release (for notes with duration)
+            if (env->total_samples > 0 && 
+                env->current_sample >= (env->total_samples - env->release_samples)) {
+                env->phase = ENVELOPE_RELEASE;
+                env->phase_start_sample = env->current_sample;
+            }
+            break;
+        
+        case ENVELOPE_RELEASE:
+            if (env->release_samples == 0) {
+                // Instant release
+                amplitude = 0.0f;
+            } else {
+                switch (env->type) {
+                    case ENVELOPE_LINEAR:
+                        // Linear ramp from sustain_level to 0
+                        amplitude = env->sustain_level * (1.0f - (float)samples_in_phase / (float)env->release_samples);
+                        break;
+                    
+                    case ENVELOPE_EXPONENTIAL:
+                        // Exponential decay
+                        float t = (float)samples_in_phase / (float)env->release_samples;
+                        amplitude = env->sustain_level * expf(-5.0f * t);
+                        break;
+                    
+                    case ENVELOPE_COSINE:
+                        // Cosine curve for smooth release
+                        float phase = (float)samples_in_phase / (float)env->release_samples * M_PI;
+                        amplitude = env->sustain_level * cosf(phase) * 0.5f + env->sustain_level * 0.5f;
+                        break;
+                }
+            }
+            
+            // Clamp to 0 if release is complete
+            if (samples_in_phase >= env->release_samples) {
+                amplitude = 0.0f;
+                env->phase = ENVELOPE_IDLE;
+            }
+            break;
+        
+        default:
+            amplitude = 0.0f;
+            break;
+    }
+    
+    // Clamp amplitude to valid range
+    if (amplitude < 0.0f) amplitude = 0.0f;
+    if (amplitude > 1.0f) amplitude = 1.0f;
+    
+    env->last_amplitude = amplitude;
+    return amplitude;
+}
+
+// Initialize envelope for a new note
+static void init_envelope_for_note(envelope_state_t *env, uint32_t duration_ms, uint32_t sample_rate) {
+    // Convert milliseconds to samples using current envelope settings
+    env->attack_samples = (envelope_attack_ms * sample_rate) / 1000;
+    env->release_samples = (envelope_release_ms * sample_rate) / 1000;
+    
+    // Calculate total samples for the note
+    if (duration_ms > 0) {
+        env->total_samples = (duration_ms * sample_rate) / 1000;
+    } else {
+        env->total_samples = 0; // Continuous tone
+    }
+    
+    // Reset envelope state
+    env->current_sample = 0;
+    env->phase = ENVELOPE_ATTACK;
+    env->phase_start_sample = 0;
+    env->last_amplitude = 0.0f;
+}
+
 // Initialize sine wave lookup table
 static esp_err_t init_sine_table(void)
 {
@@ -1139,12 +1310,23 @@ static void i2s_audio_task(void *pvParameters)
     for (int i = 0; i < I2S_SAMPLE_BUFFER_SIZE; i++)
     {
         int table_index = (int)fmod(phase_accumulator, SINE_TABLE_SIZE);
-        int16_t sample = (sine_table[table_index] * i2s_volume) / 100;
+        
+        // Get base sine value
+        int16_t base_sample = sine_table[table_index];
+        
+        // Apply envelope amplitude
+        float envelope_amp = calculate_envelope_amplitude(&current_envelope);
+        
+        // Apply both envelope and volume
+        int16_t sample = (int16_t)((base_sample * envelope_amp * i2s_volume) / 100.0f);
 
         current_buffer[i * 2] = sample;     // Left channel
         current_buffer[i * 2 + 1] = sample; // Right channel
 
         phase_accumulator = fmod(phase_accumulator + phase_increment, SINE_TABLE_SIZE);
+        
+        // Increment envelope sample counter
+        current_envelope.current_sample++;
     }
 
     while (i2s_playing)
@@ -1172,12 +1354,23 @@ static void i2s_audio_task(void *pvParameters)
         for (int i = 0; i < I2S_SAMPLE_BUFFER_SIZE; i++)
         {
             int table_index = (int)fmod(phase_accumulator, SINE_TABLE_SIZE);
-            int16_t sample = (sine_table[table_index] * i2s_volume) / 100;
+            
+            // Get base sine value
+            int16_t base_sample = sine_table[table_index];
+            
+            // Apply envelope amplitude
+            float envelope_amp = calculate_envelope_amplitude(&current_envelope);
+            
+            // Apply both envelope and volume
+            int16_t sample = (int16_t)((base_sample * envelope_amp * i2s_volume) / 100.0f);
 
             next_buffer[i * 2] = sample;     // Left channel
             next_buffer[i * 2 + 1] = sample; // Right channel
 
             phase_accumulator = fmod(phase_accumulator + phase_increment, SINE_TABLE_SIZE);
+            
+            // Increment envelope sample counter
+            current_envelope.current_sample++;
         }
 
         // Swap buffers - next becomes current, current becomes next
@@ -1412,6 +1605,9 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
     phase_accumulator = 0.0f;
     i2s_playing = true;
 
+    // Initialize envelope for this note
+    init_envelope_for_note(&current_envelope, duration_ms, i2s_sample_rate);
+
     // Create audio generation task
     BaseType_t task_ret = xTaskCreatePinnedToCore(
         i2s_audio_task,
@@ -1499,6 +1695,36 @@ int32_t native_i2s_is_playing(wasm_exec_env_t exec_env)
     return i2s_playing ? 1 : 0;
 }
 
+// Set envelope parameters for more natural sound
+int32_t native_i2s_set_envelope(wasm_exec_env_t exec_env, int32_t attack_ms, int32_t release_ms, int32_t envelope_type)
+{
+    // Validate parameters
+    if (attack_ms < 0 || attack_ms > 1000) {
+        ESP_LOGE(TAG, "Invalid attack time: %d ms", attack_ms);
+        return -1;
+    }
+    
+    if (release_ms < 0 || release_ms > 2000) {
+        ESP_LOGE(TAG, "Invalid release time: %d ms", release_ms);
+        return -2;
+    }
+    
+    if (envelope_type < 0 || envelope_type > 2) {
+        ESP_LOGE(TAG, "Invalid envelope type: %d", envelope_type);
+        return -3;
+    }
+    
+    // Update envelope settings (will be used for next note)
+    current_envelope.type = (envelope_type_t)envelope_type;
+    envelope_attack_ms = attack_ms;
+    envelope_release_ms = release_ms;
+    
+    ESP_LOGI(TAG, "Envelope set: attack=%dms, release=%dms, type=%d", 
+             attack_ms, release_ms, envelope_type);
+    
+    return 0;
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -1551,6 +1777,7 @@ NativeSymbol mcp_core_host_functions[] = {
     {"i2s_stop_tone", native_i2s_stop_tone, "()i", NULL},
     {"i2s_set_volume", native_i2s_set_volume, "(i)i", NULL},
     {"i2s_is_playing", native_i2s_is_playing, "()i", NULL},
+    {"i2s_set_envelope", native_i2s_set_envelope, "(iii)i", NULL},
 
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},
