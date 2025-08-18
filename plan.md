@@ -1,182 +1,120 @@
-Implementation Plan: DMA Event Queue + IRAM Functions Solution
+● Excellent analysis! You've identified the core issue perfectly. Let's discuss a flexible solution for making these buffer sizes configurable and moving
+  away from stack-based allocation.
 
-  Overview
+  Current Problem Analysis
 
-  Create a parallel implementation alongside the existing task-based approach, selectable via a parameter or compile-time flag.
+  Stack Overflow Issues:
+  - WASM stack: 64KB total
+  - Current stack usage:
+    - params[2048] = 2KB
+    - tool_params[2048] = 2KB
+    - Total: ~4KB just for these buffers
+  - At 4096+ bytes each = 8KB+ which is ~12.5% of total stack
+  - Plus other function call overhead → stack overflow
 
-  Phase 1: Infrastructure Setup
+  Proposed Solution: Configurable Dynamic Allocation
 
-  1.1 Add Configuration Flag
+  1. Configuration System
 
-  File: mcp_host_functions.c
-  - Add enum for audio mode selection:
-  typedef enum {
-      I2S_MODE_TASK = 0,      // Current implementation
-      I2S_MODE_DMA_EVENT = 1  // New DMA event-driven
-  } i2s_audio_mode_t;
-  - Add static variable to track mode
-  - Modify native_i2s_init() to accept mode parameter
+  Add configurable limits in mcp_sdk.h:
 
-  1.2 Create IRAM Section Definitions
+  // Configuration macros - can be overridden at compile time
+  #ifndef MCP_PARAMS_BUFFER_SIZE
+  #define MCP_PARAMS_BUFFER_SIZE 2048
+  #endif
 
-  File: mcp_host_functions.c or new mcp_audio_iram.c
-  - Define IRAM_ATTR functions for critical audio generation
-  - Separate sine table access functions marked for IRAM
-  - Create DRAM_ATTR for data that must be in internal RAM
+  #ifndef MCP_TOOL_PARAMS_BUFFER_SIZE  
+  #define MCP_TOOL_PARAMS_BUFFER_SIZE 2048
+  #endif
 
-  Phase 2: DMA Event Queue Implementation
+  #ifndef MCP_RESPONSE_BUFFER_SIZE
+  #define MCP_RESPONSE_BUFFER_SIZE 1024
+  #endif
 
-  2.1 Modify I2S Initialization
+  2. Dynamic Allocation Functions
 
-  Location: native_i2s_init()
-  - When in DMA_EVENT mode:
-    - Create I2S event queue during i2s_driver_install()
-    - Increase DMA descriptors for smoother operation
-    - Configure for optimal buffer sizes (power of 2)
+  Create buffer management functions:
 
-  2.2 Create Event Queue Handler Task
-
-  New Function: i2s_event_queue_task()
-  - Higher priority than current (24-25)
-  - Smaller stack (4KB)
-  - Pinned to Core 1
-  - Monitors I2S event queue
-  - Handles I2S_EVENT_TX_DONE events
-
-  2.3 Create IRAM Audio Generation Functions
-
-  New Functions in IRAM:
-  - IRAM_ATTR generate_sine_samples() - Core sample generation
-  - IRAM_ATTR get_sine_value() - Table lookup
-  - IRAM_ATTR fill_dma_buffer() - Buffer filling routine
-
-  Phase 3: Memory Management
-
-  3.1 Pre-allocate Buffer Pool
-
-  Location: native_i2s_init() or first tone play
-  - Allocate 4-6 DMA-capable buffers
-  - Use circular buffer management
-  - All buffers in DMA-capable memory (MALLOC_CAP_DMA)
-
-  3.2 Move Critical Data to DRAM
-
-  Data to Move:
-  - Sine table → DRAM_ATTR
-  - Phase accumulator → DRAM_ATTR
-  - Current frequency → DRAM_ATTR
-  - Buffer pointers → DRAM_ATTR
-
-  Phase 4: Interrupt and Timer Backup
-
-  4.1 Add Hardware Timer Backup
-
-  New Component: ESP Timer in ISR mode
-  - Create high-resolution timer
-  - Period = half DMA buffer duration
-  - IRAM_ATTR callback function
-  - Only activates if queue blocked
-
-  4.2 Configure Interrupt Priorities
-
-  Location: During I2S and timer setup
-  - I2S interrupt: Level 3 (highest)
-  - Timer interrupt: Level 2
-  - Mask lower priority interrupts during critical sections
-
-  Phase 5: Integration Points
-
-  5.1 Modify Play Tone Function
-
-  Location: native_i2s_play_tone()
-  if (audio_mode == I2S_MODE_DMA_EVENT) {
-      // Start event queue task
-      // Prime DMA buffers
-      // Start I2S transmission
-  } else {
-      // Existing task-based approach
+  // Internal buffer allocation helpers
+  static char* alloc_mcp_buffer(size_t size, const char* name) {
+      char* buffer = malloc(size);
+      if (!buffer) {
+          log_error("MCP", "Failed to allocate buffer for %s", name);
+      }
+      return buffer;
   }
 
-  5.2 Modify Stop Tone Function
+  static void free_mcp_buffer(char* buffer) {
+      if (buffer) free(buffer);
+  }
 
-  Location: native_i2s_stop_tone()
-  - Handle both modes
-  - Properly clean up event queue task
-  - Ensure DMA buffers are cleared
+  3. Updated Function Signatures
 
-  Phase 6: Optimization and Testing
+  In mcp_handle_request():
+  int32_t mcp_handle_request(const char* json_request, char* response, int32_t max_len) {
+      char method[64];
+      char* params = alloc_mcp_buffer(MCP_PARAMS_BUFFER_SIZE, "params");
+      if (!params) return create_jsonrpc_error(-32000, "Memory allocation failed", response, max_len);
 
-  6.1 Add Performance Metrics
+      // ... existing logic ...
 
-  - Add counters for:
-    - DMA underruns
-    - Event queue delays
-    - Buffer fill times
-    - Interrupt latency
+      free_mcp_buffer(params);
+      return result;
+  }
 
-  6.2 Create Mode Comparison Function
+  In handle_tools_call():
+  static int32_t handle_tools_call(const char* params, char* response, int32_t max_len) {
+      char tool_name[64];  // Keep small buffers on stack
+      char* tool_params = alloc_mcp_buffer(MCP_TOOL_PARAMS_BUFFER_SIZE, "tool_params");
+      if (!tool_params) return create_jsonrpc_error(-32000, "Memory allocation failed", response, max_len);
 
-  New Function: native_i2s_get_stats()
-  - Return performance metrics
-  - Allow runtime comparison
+      // ... existing logic ...
 
-  File Structure Changes
+      free_mcp_buffer(tool_params);
+      return result;
+  }
 
-  mcp_host_functions.c
-  ├── Existing task-based implementation (keep as-is)
-  ├── New DMA event mode flag/enum
-  ├── Modified init/play/stop functions with mode switch
-  └── Performance metrics collection
+  4. Developer Flexibility
 
-  mcp_audio_iram.c (new file - optional)
-  ├── IRAM_ATTR audio generation functions
-  ├── IRAM_ATTR buffer management
-  ├── IRAM_ATTR sine table operations
-  └── Event queue task implementation
+  Compile-time configuration:
+  // In project config or CMakeLists.txt
+  #define MCP_PARAMS_BUFFER_SIZE 4096
+  #define MCP_TOOL_PARAMS_BUFFER_SIZE 4096
 
-  mcp_audio_dma.h (new file - optional)
-  ├── DMA buffer structures
-  ├── Event queue configuration
-  └── IRAM function declarations
+  Runtime configuration function:
+  // Optional: Runtime configuration
+  int32_t mcp_configure_buffers(size_t params_size, size_t tool_params_size) {
+      // Store in global config struct
+      // Return validation status
+  }
 
-  Implementation Steps Order
+  5. Benefits of This Approach
 
-  1. Add mode selection infrastructure (minimal change)
-  2. Create IRAM functions (parallel development)
-  3. Implement event queue task (new code, no conflicts)
-  4. Integrate with existing play/stop (switch statement)
-  5. Add performance metrics (debugging/comparison)
-  6. Test both modes side-by-side
-  7. Optimize buffer sizes and priorities
+  ✅ Memory Efficiency: Only allocates when needed, frees immediately
+  ✅ Stack Safe: Large buffers moved to heap✅ Configurable: Developers can adjust limits per use case
+  ✅ Backward Compatible: Default sizes maintain current behavior
+  ✅ Error Handling: Clear error messages for allocation failures
+  ✅ Scalable: Easy to support larger payloads without code changes
 
-  Key Decision Points
+  6. Use Cases for Different Configurations
 
-  1. Single file vs. multiple files
-    - Single: Easier to maintain, everything in one place
-    - Multiple: Cleaner separation, easier to conditionally compile
-  2. Runtime vs. compile-time selection
-    - Runtime: Easy A/B testing
-    - Compile-time: Smaller code size
-  3. Buffer pool size
-    - More buffers = smoother but more RAM
-    - Fewer buffers = less RAM but risk of underrun
-  4. Event queue size
-    - Larger = more tolerance for delays
-    - Smaller = faster response but risk of overflow
+  Small embedded (limited RAM):
+  #define MCP_PARAMS_BUFFER_SIZE 512
+  #define MCP_TOOL_PARAMS_BUFFER_SIZE 512
 
-  Testing Strategy
+  Music/Large payloads:
+  #define MCP_PARAMS_BUFFER_SIZE 4096
+  #define MCP_TOOL_PARAMS_BUFFER_SIZE 4096
 
-  1. Phase 1: Ensure existing mode still works
-  2. Phase 2: Test DMA event mode with simple tones
-  3. Phase 3: Stress test with WiFi activity
-  4. Phase 4: Compare metrics between modes
-  5. Phase 5: Long duration stability test
+  Complex applications:
+  #define MCP_PARAMS_BUFFER_SIZE 8192
+  #define MCP_TOOL_PARAMS_BUFFER_SIZE 8192
 
-  Rollback Safety
+  Questions for Implementation:
 
-  - All changes are additive or behind mode flag
-  - Existing implementation untouched
-  - Can disable new mode via single flag
-  - Easy to remove if not improving performance
+  1. Error Handling: Should allocation failure be fatal or recoverable?
+  2. Global vs Local Config: Store config globally or pass as parameters?
+  3. Runtime vs Compile-time: Focus on compile-time config or add runtime?
+  4. Naming: Prefer MCP_MAX_* vs MCP_*_BUFFER_SIZE?
 
-  This plan allows incremental implementation while maintaining the working system, with clear comparison between approaches.
+  This approach would make the framework much more flexible while solving the immediate stack overflow issue. What are your thoughts on this design?

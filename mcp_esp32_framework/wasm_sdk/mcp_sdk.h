@@ -14,6 +14,19 @@
 #define MCP_MAX_RESPONSE 1024
 #define MCP_MAX_INPUT_SCHEMA 512
 
+// Configurable dynamic buffer sizes - can be overridden at compile time
+#ifndef MCP_PARAMS_BUFFER_SIZE
+#define MCP_PARAMS_BUFFER_SIZE 2048
+#endif
+
+#ifndef MCP_TOOL_PARAMS_BUFFER_SIZE  
+#define MCP_TOOL_PARAMS_BUFFER_SIZE 2048
+#endif
+
+#ifndef MCP_RESPONSE_BUFFER_SIZE
+#define MCP_RESPONSE_BUFFER_SIZE 1024
+#endif
+
 // MCP Result structure
 typedef struct {
     int32_t code;      // 0 = success, negative = error
