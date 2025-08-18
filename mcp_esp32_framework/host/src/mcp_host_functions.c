@@ -1073,7 +1073,7 @@ static TaskHandle_t i2s_task_handle = NULL;
 #define I2S_DATA_PIN 25 // Data Input (DIN)
 
 // Audio generation parameters
-#define I2S_SAMPLE_BUFFER_SIZE 16
+#define I2S_SAMPLE_BUFFER_SIZE 256  // Increased from 16 for smoother playback
 #define I2S_DMA_DESC_NUM 32   // was 8
 #define I2S_DMA_FRAME_NUM 512 // was 64
 #define SINE_TABLE_SIZE 1024
@@ -1134,6 +1134,62 @@ static envelope_state_t current_envelope = {
 // Current envelope settings (can be changed via i2s_set_envelope)
 static uint32_t envelope_attack_ms = DEFAULT_ATTACK_MS;
 static uint32_t envelope_release_ms = DEFAULT_RELEASE_MS;
+
+// ========== Melody Support for Continuous Playback ==========
+
+// Structure for a single note in a melody
+typedef struct {
+    float frequency;           // Note frequency in Hz
+    uint32_t duration_ms;      // Note duration in milliseconds
+    uint32_t start_sample;     // Sample index when note starts
+    uint32_t end_sample;       // Sample index when note ends
+} melody_note_t;
+
+// Dual oscillator state for crossfading
+typedef struct {
+    float frequency;           // Current frequency
+    double phase_accumulator;  // Phase for sine generation
+    envelope_state_t envelope; // Envelope state for this oscillator
+    float amplitude;          // Current amplitude (0.0-1.0)
+    bool active;              // Is this oscillator active?
+} oscillator_state_t;
+
+// Melody playback state
+typedef struct {
+    melody_note_t *notes;      // Array of parsed notes
+    int note_count;            // Total number of notes
+    int current_note_idx;      // Index of currently playing note
+    uint32_t total_samples;    // Total samples for entire melody
+    uint32_t current_sample;   // Current playback position
+    bool is_playing;           // Is melody currently playing?
+    
+    // Dual oscillators for crossfading
+    oscillator_state_t osc_a;  // Primary oscillator
+    oscillator_state_t osc_b;  // Secondary oscillator
+    
+    // Crossfade settings
+    uint32_t crossfade_samples; // Duration of crossfade in samples
+    bool crossfading;          // Are we currently crossfading?
+    uint32_t crossfade_start;  // Sample index when crossfade started
+} melody_state_t;
+
+// Global melody state
+static melody_state_t melody_state = {
+    .notes = NULL,
+    .note_count = 0,
+    .current_note_idx = 0,
+    .total_samples = 0,
+    .current_sample = 0,
+    .is_playing = false,
+    .osc_a = {.active = false},
+    .osc_b = {.active = false},
+    .crossfade_samples = 0,
+    .crossfading = false,
+    .crossfade_start = 0
+};
+
+// Default crossfade duration in milliseconds
+#define DEFAULT_CROSSFADE_MS 30
 
 // Calculate envelope amplitude for current sample
 static float calculate_envelope_amplitude(envelope_state_t *env) {
@@ -1237,8 +1293,13 @@ static float calculate_envelope_amplitude(envelope_state_t *env) {
 // Initialize envelope for a new note
 static void init_envelope_for_note(envelope_state_t *env, uint32_t duration_ms, uint32_t sample_rate) {
     // Convert milliseconds to samples using current envelope settings
+    // Make sure we have sensible defaults if not set
+    if (envelope_attack_ms == 0) envelope_attack_ms = DEFAULT_ATTACK_MS;
+    if (envelope_release_ms == 0) envelope_release_ms = DEFAULT_RELEASE_MS;
+    
     env->attack_samples = (envelope_attack_ms * sample_rate) / 1000;
     env->release_samples = (envelope_release_ms * sample_rate) / 1000;
+    env->sustain_level = DEFAULT_SUSTAIN_LEVEL;  // Make sure sustain level is set!
     
     // Calculate total samples for the note
     if (duration_ms > 0) {
@@ -1252,6 +1313,12 @@ static void init_envelope_for_note(envelope_state_t *env, uint32_t duration_ms, 
     env->phase = ENVELOPE_ATTACK;
     env->phase_start_sample = 0;
     env->last_amplitude = 0.0f;
+    env->type = current_envelope.type;  // Use the global envelope type setting
+    
+    // Debug: Log envelope initialization
+    ESP_LOGI(TAG, "Envelope init: attack=%lu samples, release=%lu samples, total=%lu, type=%d, sustain=%.2f", 
+             env->attack_samples, env->release_samples, env->total_samples, 
+             env->type, env->sustain_level);
 }
 
 // Initialize sine wave lookup table
@@ -1384,6 +1451,396 @@ static void i2s_audio_task(void *pvParameters)
     // Clean up both buffers
     heap_caps_free(buffer_A);
     heap_caps_free(buffer_B);
+    i2s_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+// ========== Melody Helper Functions ==========
+
+// Parse a single note string (e.g., "440:500" or just "440")
+static int parse_melody_note(const char *note_str, float *frequency, uint32_t *duration_ms) {
+    if (!note_str || !frequency || !duration_ms) return -1;
+    
+    // Default duration if not specified
+    *duration_ms = 500;
+    
+    // Try to parse frequency:duration format
+    char *colon = strchr(note_str, ':');
+    if (colon) {
+        // Parse frequency
+        *frequency = atof(note_str);
+        // Parse duration
+        *duration_ms = atoi(colon + 1);
+    } else {
+        // Just frequency, use default duration
+        *frequency = atof(note_str);
+    }
+    
+    // Validate
+    if (*frequency < 20.0f || *frequency > 20000.0f) {
+        ESP_LOGE(TAG, "Invalid frequency: %.2f Hz", *frequency);
+        return -1;
+    }
+    
+    if (*duration_ms < 10 || *duration_ms > 10000) {
+        ESP_LOGE(TAG, "Invalid duration: %lu ms", *duration_ms);
+        return -1;
+    }
+    
+    return 0;
+}
+
+// Parse melody string into array of notes
+static int parse_melody_string(const char *melody_str, melody_note_t **notes_out, int *note_count_out) {
+    if (!melody_str || !notes_out || !note_count_out) return -1;
+    
+    // Count commas to estimate number of notes
+    int comma_count = 0;
+    for (const char *p = melody_str; *p; p++) {
+        if (*p == ',') comma_count++;
+    }
+    int estimated_notes = comma_count + 1;
+    
+    // Allocate memory for notes
+    melody_note_t *notes = heap_caps_malloc(estimated_notes * sizeof(melody_note_t), MALLOC_CAP_8BIT);
+    if (!notes) {
+        ESP_LOGE(TAG, "Failed to allocate memory for melody notes");
+        return -1;
+    }
+    
+    // Make a copy of the string for parsing
+    char *melody_copy = heap_caps_malloc(strlen(melody_str) + 1, MALLOC_CAP_8BIT);
+    if (!melody_copy) {
+        heap_caps_free(notes);
+        return -1;
+    }
+    strcpy(melody_copy, melody_str);
+    
+    // Parse each note
+    int note_count = 0;
+    uint32_t cumulative_samples = 0;
+    char *token = strtok(melody_copy, ",");
+    
+    while (token && note_count < estimated_notes) {
+        // Skip whitespace
+        while (*token == ' ' || *token == '\t') token++;
+        
+        float frequency;
+        uint32_t duration_ms;
+        
+        if (parse_melody_note(token, &frequency, &duration_ms) == 0) {
+            notes[note_count].frequency = frequency;
+            notes[note_count].duration_ms = duration_ms;
+            notes[note_count].start_sample = cumulative_samples;
+            
+            // Calculate samples for this note
+            uint32_t note_samples = (duration_ms * i2s_sample_rate) / 1000;
+            cumulative_samples += note_samples;
+            notes[note_count].end_sample = cumulative_samples;
+            
+            note_count++;
+        }
+        
+        token = strtok(NULL, ",");
+    }
+    
+    heap_caps_free(melody_copy);
+    
+    if (note_count == 0) {
+        heap_caps_free(notes);
+        return -1;
+    }
+    
+    *notes_out = notes;
+    *note_count_out = note_count;
+    
+    return 0;
+}
+
+// Initialize oscillator for a note
+static void init_oscillator_for_note(oscillator_state_t *osc, float frequency, uint32_t sample_rate) {
+    osc->frequency = frequency;
+    osc->phase_accumulator = 0.0;
+    osc->active = true;
+    osc->amplitude = 0.0f;
+    
+    // Initialize envelope for this oscillator
+    init_envelope_for_note(&osc->envelope, 0, sample_rate); // Duration 0 = controlled manually
+}
+
+// Generate sample from oscillator with envelope
+static int16_t generate_oscillator_sample(oscillator_state_t *osc, uint32_t sample_rate, int volume_percent) {
+    if (!osc->active) return 0;
+    
+    // Calculate phase increment
+    double phase_increment = (osc->frequency * SINE_TABLE_SIZE) / sample_rate;
+    
+    // Get sine value
+    int table_index = (int)fmod(osc->phase_accumulator, SINE_TABLE_SIZE);
+    int16_t base_sample = sine_table[table_index];
+    
+    // Apply envelope
+    float envelope_amp = calculate_envelope_amplitude(&osc->envelope);
+    
+    // Debug first few samples
+    static int debug_count = 0;
+    if (debug_count < 5) {
+        ESP_LOGI(TAG, "Osc sample: base=%d, env_amp=%.3f, vol=%d, env.phase=%d, env.current=%lu", 
+                 base_sample, envelope_amp, volume_percent, 
+                 osc->envelope.phase, osc->envelope.current_sample);
+        debug_count++;
+    }
+    
+    // Apply volume and envelope
+    int16_t sample = (int16_t)((base_sample * envelope_amp * volume_percent) / 100.0f);
+    
+    // Update phase
+    osc->phase_accumulator = fmod(osc->phase_accumulator + phase_increment, SINE_TABLE_SIZE);
+    
+    // Update envelope sample counter
+    osc->envelope.current_sample++;
+    
+    return sample;
+}
+
+// Continuous melody audio generation task
+static void i2s_melody_task(void *pvParameters) {
+    // Double buffering for smooth playback
+    size_t buffer_size = I2S_SAMPLE_BUFFER_SIZE * sizeof(int16_t) * 2;
+    
+    // Allocate TWO buffers for double buffering
+    int16_t *buffer_A = heap_caps_malloc(buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    int16_t *buffer_B = heap_caps_malloc(buffer_size, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    
+    if (!buffer_A || !buffer_B) {
+        ESP_LOGE(TAG, "Failed to allocate I2S melody buffers");
+        if (buffer_A) heap_caps_free(buffer_A);
+        if (buffer_B) heap_caps_free(buffer_B);
+        melody_state.is_playing = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // Buffer pointers for swapping
+    int16_t *current_buffer = buffer_A;
+    int16_t *next_buffer = buffer_B;
+    size_t bytes_written;
+    
+    // Start I2S for melody playback
+    esp_err_t i2s_ret = i2s_start(I2S_NUM_0);
+    if (i2s_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start I2S in melody task: %s", esp_err_to_name(i2s_ret));
+        heap_caps_free(buffer_A);
+        heap_caps_free(buffer_B);
+        melody_state.is_playing = false;
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(TAG, "I2S started for melody playback");
+    
+    // Calculate crossfade samples
+    melody_state.crossfade_samples = (DEFAULT_CROSSFADE_MS * i2s_sample_rate) / 1000;
+    
+    // Initialize first note
+    if (melody_state.note_count > 0) {
+        ESP_LOGI(TAG, "Initializing first note: freq=%.2f Hz, duration=%lu ms", 
+                 melody_state.notes[0].frequency, melody_state.notes[0].duration_ms);
+        init_oscillator_for_note(&melody_state.osc_a, 
+                                melody_state.notes[0].frequency, 
+                                i2s_sample_rate);
+        melody_state.current_note_idx = 0;
+    }
+    
+    ESP_LOGI(TAG, "Starting melody playback: %d notes, total_samples=%lu", 
+             melody_state.note_count, melody_state.total_samples);
+    
+    // Check critical system state before starting
+    ESP_LOGI(TAG, "Pre-loop checks: sine_table=%p, i2s_sample_rate=%lu, crossfade_samples=%lu", 
+             sine_table, i2s_sample_rate, melody_state.crossfade_samples);
+    ESP_LOGI(TAG, "Oscillator A: active=%d, freq=%.2f, envelope.phase=%d", 
+             melody_state.osc_a.active, melody_state.osc_a.frequency, melody_state.osc_a.envelope.phase);
+    ESP_LOGI(TAG, "i2s_volume=%d, buffer_size=%d samples", i2s_volume, I2S_SAMPLE_BUFFER_SIZE);
+    
+    ESP_LOGI(TAG, "Entering melody playback loop");
+    
+    while (melody_state.is_playing) {
+        ESP_LOGD(TAG, "Processing buffer, current_sample=%lu, current_note=%d", 
+                 melody_state.current_sample, melody_state.current_note_idx);
+        
+        // Fill buffer with samples
+        // ESP_LOGD(TAG, "About to fill buffer, I2S_SAMPLE_BUFFER_SIZE=%d", I2S_SAMPLE_BUFFER_SIZE);
+        
+        for (int i = 0; i < I2S_SAMPLE_BUFFER_SIZE; i++) {
+            // Log only occasionally to avoid flooding
+            // if (i == 0) {
+            //     ESP_LOGD(TAG, "Entering buffer fill loop, sample 0");
+            // }
+            int32_t mixed_sample = 0;  // Use int32_t for mixing to prevent overflow
+            
+            // Check if we need to start next note (with crossfade)
+            if (melody_state.current_note_idx < melody_state.note_count) {
+                melody_note_t *current_note = &melody_state.notes[melody_state.current_note_idx];
+                
+                // Log only on note changes
+                static int last_logged_note = -1;
+                if (i == 0 && melody_state.current_note_idx != last_logged_note) {
+                    ESP_LOGI(TAG, "Processing note %d: freq=%.2f, start=%lu, end=%lu, current_sample=%lu", 
+                             melody_state.current_note_idx, current_note->frequency, 
+                             current_note->start_sample, current_note->end_sample, melody_state.current_sample);
+                    last_logged_note = melody_state.current_note_idx;
+                }
+                
+                // Check if we're approaching the end of current note and need to start crossfade
+                if (!melody_state.crossfading && 
+                    melody_state.current_sample >= (current_note->end_sample - melody_state.crossfade_samples) &&
+                    melody_state.current_note_idx < melody_state.note_count - 1) {
+                    
+                    // Start crossfade to next note
+                    melody_state.crossfading = true;
+                    melody_state.crossfade_start = melody_state.current_sample;
+                    
+                    // Initialize oscillator B with next note
+                    melody_note_t *next_note = &melody_state.notes[melody_state.current_note_idx + 1];
+                    init_oscillator_for_note(&melody_state.osc_b, next_note->frequency, i2s_sample_rate);
+                    
+                    ESP_LOGD(TAG, "Starting crossfade from note %d (%.1fHz) to note %d (%.1fHz)", 
+                            melody_state.current_note_idx, current_note->frequency,
+                            melody_state.current_note_idx + 1, next_note->frequency);
+                }
+                
+                // Generate samples from active oscillators
+                if (melody_state.osc_a.active) {
+                    ESP_LOGV(TAG, "Generating sample from osc_a: freq=%.2f", melody_state.osc_a.frequency);
+                    int16_t sample_a = generate_oscillator_sample(&melody_state.osc_a, i2s_sample_rate, i2s_volume);
+                    
+                    if (melody_state.crossfading) {
+                        // Calculate crossfade progress (0.0 to 1.0)
+                        uint32_t crossfade_progress = melody_state.current_sample - melody_state.crossfade_start;
+                        float fade_out = 1.0f - ((float)crossfade_progress / (float)melody_state.crossfade_samples);
+                        fade_out = fade_out < 0.0f ? 0.0f : fade_out;
+                        sample_a = (int16_t)(sample_a * fade_out);
+                    }
+                    
+                    mixed_sample += sample_a;
+                }
+                
+                if (melody_state.osc_b.active) {
+                    int16_t sample_b = generate_oscillator_sample(&melody_state.osc_b, i2s_sample_rate, i2s_volume);
+                    
+                    if (melody_state.crossfading) {
+                        // Calculate crossfade progress (0.0 to 1.0)
+                        uint32_t crossfade_progress = melody_state.current_sample - melody_state.crossfade_start;
+                        float fade_in = (float)crossfade_progress / (float)melody_state.crossfade_samples;
+                        fade_in = fade_in > 1.0f ? 1.0f : fade_in;
+                        sample_b = (int16_t)(sample_b * fade_in);
+                    }
+                    
+                    mixed_sample += sample_b;
+                }
+                
+                // Check if no oscillators are active
+                if (!melody_state.osc_a.active && !melody_state.osc_b.active) {
+                    if (i == 0) { // Log once per buffer
+                        ESP_LOGW(TAG, "No oscillators active for note %d! freq=%.2f", 
+                                 melody_state.current_note_idx, current_note->frequency);
+                    }
+                    // Try to activate oscillator A if inactive
+                    if (melody_state.current_sample >= current_note->start_sample && 
+                        melody_state.current_sample < current_note->end_sample) {
+                        ESP_LOGW(TAG, "Activating oscillator A for note %d", melody_state.current_note_idx);
+                        init_oscillator_for_note(&melody_state.osc_a, current_note->frequency, i2s_sample_rate);
+                    }
+                }
+                
+                // Check if crossfade is complete
+                if (melody_state.crossfading && 
+                    (melody_state.current_sample - melody_state.crossfade_start) >= melody_state.crossfade_samples) {
+                    
+                    // Swap oscillators: B becomes A, A becomes inactive
+                    melody_state.osc_a = melody_state.osc_b;
+                    melody_state.osc_b.active = false;
+                    melody_state.crossfading = false;
+                    melody_state.current_note_idx++;
+                    
+                    ESP_LOGD(TAG, "Crossfade complete, now playing note %d", melody_state.current_note_idx);
+                }
+                
+                // Check if current note is complete (no crossfade) - only for last note or error cases
+                if (!melody_state.crossfading && 
+                    melody_state.current_sample >= current_note->end_sample &&
+                    melody_state.current_note_idx == melody_state.note_count - 1) {
+                    // Last note completed
+                    melody_state.current_note_idx++;
+                }
+            }
+            
+            // Clamp mixed sample to int16_t range
+            if (mixed_sample > INT16_MAX) mixed_sample = INT16_MAX;
+            if (mixed_sample < INT16_MIN) mixed_sample = INT16_MIN;
+            
+            int16_t final_sample = (int16_t)mixed_sample;
+            
+            // Write to both channels
+            current_buffer[i * 2] = final_sample;     // Left channel
+            current_buffer[i * 2 + 1] = final_sample; // Right channel
+            
+            // Debug: Log first few samples to see if we're generating audio
+            if (i < 3 && melody_state.current_note_idx == 0 && melody_state.current_sample < 100) {
+                ESP_LOGI(TAG, "Sample[%d]: mixed=%ld, final=%d", i, mixed_sample, final_sample);
+            }
+            
+            melody_state.current_sample++;
+            
+            // Check if melody is complete
+            if (melody_state.current_note_idx >= melody_state.note_count) {
+                ESP_LOGI(TAG, "Melody complete: note_idx=%d >= note_count=%d", 
+                         melody_state.current_note_idx, melody_state.note_count);
+                melody_state.is_playing = false;
+                break;
+            }
+        }
+        
+        if (!melody_state.is_playing) {
+            ESP_LOGI(TAG, "Melody stopped, breaking from loop");
+            break;
+        }
+        
+        // ESP_LOGD(TAG, "About to write buffer to I2S, buffer_size=%d", buffer_size);
+        
+        // Write buffer to I2S
+        esp_err_t ret = i2s_write(I2S_NUM_0, current_buffer, buffer_size, 
+                                 &bytes_written, portMAX_DELAY);
+        
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "I2S write failed in melody task: %s", esp_err_to_name(ret));
+            break;
+        }
+        
+        // Swap buffers
+        int16_t *temp = current_buffer;
+        current_buffer = next_buffer;
+        next_buffer = temp;
+    }
+    
+    ESP_LOGI(TAG, "Melody playback complete");
+    
+    // Stop I2S to turn off the clocks
+    i2s_zero_dma_buffer(I2S_NUM_0);  // Clear DMA buffer to prevent noise
+    i2s_stop(I2S_NUM_0);              // Stop I2S peripheral
+    ESP_LOGI(TAG, "I2S stopped after melody playback");
+    
+    // Clean up
+    heap_caps_free(buffer_A);
+    heap_caps_free(buffer_B);
+    
+    // Clear melody state
+    if (melody_state.notes) {
+        heap_caps_free(melody_state.notes);
+        melody_state.notes = NULL;
+    }
+    melody_state.note_count = 0;
+    melody_state.is_playing = false;
+    
     i2s_task_handle = NULL;
     vTaskDelete(NULL);
 }
@@ -1725,6 +2182,98 @@ int32_t native_i2s_set_envelope(wasm_exec_env_t exec_env, int32_t attack_ms, int
     return 0;
 }
 
+// Play melody with continuous audio and crossfading
+int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str, int32_t volume_percent) {
+    if (!i2s_initialized) {
+        ESP_LOGE(TAG, "I2S not initialized");
+        return -1;
+    }
+    
+    if (!melody_str || strlen(melody_str) == 0) {
+        ESP_LOGE(TAG, "Invalid melody string");
+        return -2;
+    }
+    
+    if (volume_percent < 0 || volume_percent > 100) {
+        ESP_LOGE(TAG, "Invalid volume: %d%%", volume_percent);
+        return -3;
+    }
+    
+    // Stop any current playback
+    if (melody_state.is_playing) {
+        melody_state.is_playing = false;
+        vTaskDelay(pdMS_TO_TICKS(100)); // Wait for task to clean up
+    }
+    
+    // Parse the melody string
+    melody_note_t *notes = NULL;
+    int note_count = 0;
+    
+    if (parse_melody_string(melody_str, &notes, &note_count) != 0) {
+        ESP_LOGE(TAG, "Failed to parse melody string");
+        return -4;
+    }
+    
+    if (note_count == 0) {
+        ESP_LOGE(TAG, "No valid notes in melody");
+        if (notes) heap_caps_free(notes);
+        return -5;
+    }
+    
+    // Initialize melody state
+    melody_state.notes = notes;
+    melody_state.note_count = note_count;
+    melody_state.current_note_idx = 0;
+    melody_state.current_sample = 0;
+    melody_state.total_samples = notes[note_count - 1].end_sample;
+    melody_state.is_playing = true;
+    melody_state.crossfading = false;
+    melody_state.osc_a.active = false;
+    melody_state.osc_b.active = false;
+    
+    // Set volume
+    i2s_volume = volume_percent;
+    
+    ESP_LOGI(TAG, "Playing melody: %d notes, volume %d%%", note_count, volume_percent);
+    
+    // Create melody playback task
+    BaseType_t task_ret = xTaskCreatePinnedToCore(
+        i2s_melody_task,
+        "i2s_melody",
+        8192,
+        NULL,
+        20,
+        &i2s_task_handle,
+        1);
+    
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create I2S melody task");
+        heap_caps_free(notes);
+        melody_state.notes = NULL;
+        melody_state.is_playing = false;
+        return -6;
+    }
+    
+    return 0;
+}
+
+// Stop melody playback
+int32_t native_i2s_stop_melody(wasm_exec_env_t exec_env) {
+    if (!i2s_initialized) {
+        return -1;
+    }
+    
+    // Stop melody playback
+    melody_state.is_playing = false;
+    
+    // Wait a bit for task to clean up
+    vTaskDelay(pdMS_TO_TICKS(50));
+    
+    ESP_LOGI(TAG, "Melody playback stopped");
+    
+    return 0;
+}
+
 // ========== Host Function Registration ==========
 
 NativeSymbol mcp_core_host_functions[] = {
@@ -1736,7 +2285,7 @@ NativeSymbol mcp_core_host_functions[] = {
     // {"strlen", mcp_native_strlen, "($)i", NULL},
     // {"strcmp", mcp_native_strcmp, "($$)i", NULL},
     // {"strcpy", mcp_native_strcpy, "($$)i", NULL},
-    // {"strcat", mcp_native_strcat, "($$)i", NULL},
+    {"strcat", mcp_native_strcat, "($$)i", NULL},
     // {"strncpy", mcp_native_strncpy, "($*i)i", NULL},
     // {"strstr", mcp_native_strstr, "($$)i", NULL},
     // {"strncmp", mcp_native_strncmp, "($$i)i", NULL},
@@ -1778,6 +2327,8 @@ NativeSymbol mcp_core_host_functions[] = {
     {"i2s_set_volume", native_i2s_set_volume, "(i)i", NULL},
     {"i2s_is_playing", native_i2s_is_playing, "()i", NULL},
     {"i2s_set_envelope", native_i2s_set_envelope, "(iii)i", NULL},
+    {"i2s_play_melody", native_i2s_play_melody, "($i)i", NULL},
+    {"i2s_stop_melody", native_i2s_stop_melody, "()i", NULL},
 
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},

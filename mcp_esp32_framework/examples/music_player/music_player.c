@@ -177,12 +177,11 @@ mcp_result_t play_note_handler(const char* params) {
     return mcp_success(result_json);
 }
 
-// Tool: play_melody - Play a sequence of notes
+// Tool: play_melody - Play a sequence of notes with crossfading
 mcp_result_t play_melody_handler(const char* params) {
     char melody[MAX_MELODY_LENGTH];
     int volume = current_volume;
     char result_json[256];
-    int notes_played = 0;
     
     log_info("MUSIC", "play_melody_handler called");
     
@@ -198,25 +197,21 @@ mcp_result_t play_melody_handler(const char* params) {
         return mcp_error(-3, "Volume must be between 0 and 100");
     }
     
-    log_info("MUSIC", "Starting melody playback");
+    log_info("MUSIC", "Converting note names to frequencies");
     
-    // Start I2S once for entire melody
-    if (i2s_start() != 0) {
-        return mcp_error(-4, "Failed to start I2S for melody");
-    }
-    
-    // Parse and play melody sequentially
+    // Convert note names to frequencies for the new continuous playback
+    char frequency_melody[MAX_MELODY_LENGTH * 2] = {0};  // Extra space for frequency strings
     char* melody_copy = malloc(strlen(melody) + 1);
     if (!melody_copy) {
-        i2s_stop();  // Stop I2S if we fail
         return mcp_error(-5, "Failed to allocate memory for melody parsing");
     }
     strcpy(melody_copy, melody);
     
     char* note_token = melody_copy;
     char* next_comma = NULL;
+    int first_note = 1;
     
-    // Process each note in the melody
+    // Process each note and convert to frequency
     while (note_token && *note_token) {
         // Find next comma or end of string
         next_comma = strstr(note_token, ",");
@@ -229,40 +224,34 @@ mcp_result_t play_melody_handler(const char* params) {
             note_token++;
         }
         
-        if (*note_token) {  // If we have a note to play
+        if (*note_token) {  // If we have a note to process
             // Parse note and duration
             char note_name[MAX_NOTE_LENGTH];
             int duration;
             
             if (parse_note_duration(note_token, note_name, &duration) == 0) {
-                // Play the note
-                mcp_result_t note_result = play_single_note(note_name, duration, volume);
-                if (note_result.code != 0) {
+                // Get frequency for the note
+                float freq = get_note_frequency(note_name);
+                if (freq <= 0.0f) {
                     free(melody_copy);
-                    i2s_stop();  // Stop I2S on error
-                    return note_result;  // Return error from note playback
+                    return mcp_error(-6, "Unknown note name");
                 }
                 
-                notes_played++;
-                
-                // Wait for note to finish playing
-                // Use polling with small sleeps to avoid blocking the watchdog
-                int wait_loops = (duration + 50) / 10;  // Check every 10ms
-                for (int i = 0; i < wait_loops; i++) {
-                    // Check if still playing (this yields to scheduler)
-                    if (i2s_is_playing() == 0) {
-                        break;  // Note finished early
-                    }
-                    // Small delay to yield CPU (prevents watchdog)
-                    for (volatile int j = 0; j < 10000; j++) {
-                        // ~10ms delay
-                    }
+                // Add to frequency melody string
+                if (!first_note) {
+                    strcat(frequency_melody, ",");
                 }
+                
+                char freq_str[32];
+                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
+                strcat(frequency_melody, freq_str);
+                
+                log_info("MUSIC", "Converted note to frequency");  // Simple debug log
+                
+                first_note = 0;
             } else {
-                log_error("MUSIC", "Failed to parse note");
                 free(melody_copy);
-                i2s_stop();  // Stop I2S on error
-                return mcp_error(-6, "Invalid note format in melody");
+                return mcp_error(-7, "Invalid note format in melody");
             }
         }
         
@@ -276,13 +265,20 @@ mcp_result_t play_melody_handler(const char* params) {
     
     free(melody_copy);
     
-    // Stop I2S after melody completes
-    i2s_stop();
-    is_playing = false;
+    log_info("MUSIC", "Frequency melody string ready");
+    log_info("MUSIC", "Starting continuous melody playback with crossfading");
+    
+    // Don't call i2s_start() - the melody function handles I2S internally
+    // Use the new continuous melody playback with crossfading
+    if (i2s_play_melody(frequency_melody, volume) != 0) {
+        return mcp_error(-8, "Failed to start melody playback");
+    }
+    
+    is_playing = true;
     
     snprintf(result_json, sizeof(result_json),
-        "Melody completed: played %d notes at volume %d%% via I2S audio",
-        notes_played, volume);
+        "Playing melody with crossfading at volume %d%% via continuous I2S audio",
+        volume);
     
     return mcp_success(result_json);
 }
@@ -293,10 +289,11 @@ mcp_result_t stop_music_handler(const char* params) {
     
     log_info("MUSIC", "stop_music_handler called");
     
-    // Stop I2S playback if playing
+    // Stop any type of playback
     if (is_playing) {
-        i2s_stop_tone();
-        i2s_stop();  // Stop I2S clock generation
+        i2s_stop_tone();      // Stop single tone
+        i2s_stop_melody();    // Stop melody playback
+        i2s_stop();           // Stop I2S clock generation
         is_playing = false;
     }
     

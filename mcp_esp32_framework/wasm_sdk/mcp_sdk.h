@@ -91,6 +91,9 @@ extern int32_t i2s_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t 
 extern int32_t i2s_stop_tone(void);
 extern int32_t i2s_set_volume(int32_t volume_percent);
 extern int32_t i2s_is_playing(void);
+extern int32_t i2s_set_envelope(int32_t attack_ms, int32_t release_ms, int32_t envelope_type);
+extern int32_t i2s_play_melody(const char* melody_str, int32_t volume_percent);
+extern int32_t i2s_stop_melody(void);
 
 // SSE Events
 extern int32_t sse_send_event(const char* event_type, const char* data);
