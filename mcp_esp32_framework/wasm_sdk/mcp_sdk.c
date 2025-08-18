@@ -132,7 +132,7 @@ int32_t mcp_handle_request(const char* json_request, char* response, int32_t max
     log_info("MCP", "mcp_handle_request: Starting");
     
     char method[64];
-    char params[512];
+    char params[2048];
     
     // Parse JSON-RPC request
     log_info("MCP", "mcp_handle_request: About to parse JSON");
@@ -336,7 +336,7 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
     }
     
     char tool_name[64];
-    char tool_params[256];
+    char tool_params[2048];
     
     // Parse tool name from params
     if (mcp_parse_string_param(params, "name", tool_name, sizeof(tool_name)) != 0) {

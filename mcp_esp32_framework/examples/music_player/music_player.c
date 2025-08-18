@@ -7,7 +7,7 @@
 // Configuration
 #define DEFAULT_VOLUME 50  // 0-100%
 #define MAX_NOTE_LENGTH 8  // "C#7:1000"
-#define MAX_MELODY_LENGTH 512
+#define MAX_MELODY_LENGTH 2048
 
 // Note frequency table (A4 = 440Hz reference)
 typedef struct {
@@ -184,12 +184,17 @@ mcp_result_t play_melody_handler(const char* params) {
     char result_json[256];
     
     log_info("MUSIC", "play_melody_handler called");
-    
+
+    log_info("MUSIC: params", params);
+
     // Parse parameters
     if (mcp_parse_string_param(params, "melody", melody, sizeof(melody)) != 0) {
         return mcp_error(-1, "Missing 'melody' parameter");
     }
-    
+
+    log_info("MUSIC", "Melody after wasm parsing ...");
+    log_info("MUSIC", melody);
+
     // Optional volume
     mcp_parse_int_param(params, "volume", &volume);
     
@@ -200,12 +205,24 @@ mcp_result_t play_melody_handler(const char* params) {
     log_info("MUSIC", "Converting note names to frequencies");
     
     // Convert note names to frequencies for the new continuous playback
-    char frequency_melody[MAX_MELODY_LENGTH * 2] = {0};  // Extra space for frequency strings
-    char* melody_copy = malloc(strlen(melody) + 1);
+    // Allocate dynamic buffer with 3x expansion factor for frequency conversion
+    size_t melody_len = strlen(melody);
+    size_t frequency_buffer_size = melody_len * 3 + 1;  // 3x expansion + null terminator
+    char* frequency_melody = malloc(frequency_buffer_size);
+    if (!frequency_melody) {
+        return mcp_error(-5, "Failed to allocate memory for frequency melody buffer");
+    }
+    frequency_melody[0] = '\0';  // Initialize empty string
+    
+    char* melody_copy = malloc(melody_len + 1);
     if (!melody_copy) {
+        free(frequency_melody);
         return mcp_error(-5, "Failed to allocate memory for melody parsing");
     }
     strcpy(melody_copy, melody);
+
+    log_info("MUSIC", "Melody copy ...");
+    log_info("MUSIC", melody_copy);
     
     char* note_token = melody_copy;
     char* next_comma = NULL;
@@ -234,16 +251,29 @@ mcp_result_t play_melody_handler(const char* params) {
                 float freq = get_note_frequency(note_name);
                 if (freq <= 0.0f) {
                     free(melody_copy);
+                    free(frequency_melody);
                     return mcp_error(-6, "Unknown note name");
                 }
                 
-                // Add to frequency melody string
+                // Add to frequency melody string with safety checks
+                size_t current_len = strlen(frequency_melody);
+                char freq_str[32];
+                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
+                
+                // Calculate space needed
+                size_t comma_len = first_note ? 0 : 1;  // comma if not first note
+                size_t freq_len = strlen(freq_str);
+                size_t total_needed = current_len + comma_len + freq_len + 1; // +1 for null terminator
+                
+                if (total_needed >= frequency_buffer_size) {
+                    free(melody_copy);
+                    free(frequency_melody);
+                    return mcp_error(-9, "Frequency melody buffer overflow");
+                }
+                
                 if (!first_note) {
                     strcat(frequency_melody, ",");
                 }
-                
-                char freq_str[32];
-                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
                 strcat(frequency_melody, freq_str);
                 
                 log_info("MUSIC", "Converted note to frequency");  // Simple debug log
@@ -251,6 +281,7 @@ mcp_result_t play_melody_handler(const char* params) {
                 first_note = 0;
             } else {
                 free(melody_copy);
+                free(frequency_melody);
                 return mcp_error(-7, "Invalid note format in melody");
             }
         }
@@ -271,8 +302,12 @@ mcp_result_t play_melody_handler(const char* params) {
     // Don't call i2s_start() - the melody function handles I2S internally
     // Use the new continuous melody playback with crossfading
     if (i2s_play_melody(frequency_melody, volume) != 0) {
+        free(frequency_melody);
         return mcp_error(-8, "Failed to start melody playback");
     }
+    
+    // Free the frequency melody buffer after successful call to host function
+    free(frequency_melody);
     
     is_playing = true;
     

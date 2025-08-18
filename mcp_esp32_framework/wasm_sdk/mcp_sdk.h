@@ -10,7 +10,7 @@
 // Maximum buffer sizes
 #define MCP_MAX_TOOL_NAME 64
 #define MCP_MAX_DESCRIPTION 256
-#define MCP_MAX_PARAMS 512
+#define MCP_MAX_PARAMS 2048
 #define MCP_MAX_RESPONSE 1024
 #define MCP_MAX_INPUT_SCHEMA 512
 
