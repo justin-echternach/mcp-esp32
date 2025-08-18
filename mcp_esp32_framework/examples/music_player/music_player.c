@@ -17,7 +17,7 @@ typedef struct {
 
 // Global pointer to heap-allocated frequency table
 static note_freq_t* note_frequencies = NULL;
-static int note_count = 68;  // Total notes from C4 to B7
+static int note_count = 102;  // Total notes from C2 to B7
 
 // Initialize note frequency table on heap
 static void init_note_frequencies(void) {
@@ -31,6 +31,44 @@ static void init_note_frequencies(void) {
     }
     
     int idx = 0;
+    
+    // C2 octave - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','2','\0'}, 65.41f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','2','\0'}, 69.30f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','2','\0'}, 69.30f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','2','\0'}, 73.42f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','2','\0'}, 77.78f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','2','\0'}, 77.78f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','2','\0'}, 82.41f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','2','\0'}, 87.31f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','2','\0'}, 92.50f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','2','\0'}, 92.50f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','2','\0'}, 98.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','2','\0'}, 103.83f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','2','\0'}, 103.83f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','2','\0'}, 110.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','2','\0'}, 116.54f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','2','\0'}, 116.54f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','2','\0'}, 123.47f}; idx++;
+    
+    // C3 octave - Using direct initialization instead of strcpy
+    note_frequencies[idx] = (note_freq_t){{'C','3','\0'}, 130.81f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'C','#','3','\0'}, 138.59f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','b','3','\0'}, 138.59f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','3','\0'}, 146.83f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'D','#','3','\0'}, 155.56f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','b','3','\0'}, 155.56f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'E','3','\0'}, 164.81f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','3','\0'}, 174.61f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'F','#','3','\0'}, 185.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','b','3','\0'}, 185.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','3','\0'}, 196.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'G','#','3','\0'}, 207.65f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','b','3','\0'}, 207.65f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','3','\0'}, 220.00f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'A','#','3','\0'}, 233.08f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','b','3','\0'}, 233.08f}; idx++;
+    note_frequencies[idx] = (note_freq_t){{'B','3','\0'}, 246.94f}; idx++;
     
     // C4 octave (Middle C octave) - Using direct initialization instead of strcpy
     note_frequencies[idx] = (note_freq_t){{'C','4','\0'}, 261.63f}; idx++;
