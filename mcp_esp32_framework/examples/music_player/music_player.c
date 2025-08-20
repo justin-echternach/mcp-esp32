@@ -502,6 +502,67 @@ static mcp_result_t play_single_note(const char* note, int duration, int volume)
     return mcp_success("{}");
 }
 
+// Bluetooth initialization handler
+static mcp_result_t bluetooth_init_handler(const char* params) {
+    log_info("MUSIC", "[WASM] Initializing Bluetooth stack");
+    
+    int32_t result = bluetooth_init();
+    if (result != 0) {
+        log_error("MUSIC", "[WASM] Failed to initialize Bluetooth");
+        return mcp_error(-1, "Failed to initialize Bluetooth");
+    }
+    
+    log_info("MUSIC", "[WASM] Bluetooth initialized successfully");
+    return mcp_success("Bluetooth initialized successfully");
+}
+
+// Bluetooth scan handler
+static mcp_result_t bluetooth_scan_handler(const char* params) {
+    log_info("MUSIC", "[WASM] Starting Bluetooth device scan");
+    
+    // Default timeout 10 seconds
+    int32_t timeout = 10;
+    
+    // Parse timeout from params if provided (simple parsing for now)
+    // TODO: Use proper JSON parsing if needed
+    
+    log_info("MUSIC", "[WASM] Scanning for Bluetooth devices");
+    
+    // Start scan
+    int32_t result = bluetooth_scan_start(timeout);
+    if (result != 0) {
+        log_error("MUSIC", "[WASM] Failed to start scan");
+        return mcp_error(-1, "Failed to start Bluetooth scan");
+    }
+    
+    // Get results (allocate buffer for JSON response)
+    char scan_buffer[1024] = {0};
+    result = bluetooth_scan_get_results(scan_buffer, sizeof(scan_buffer));
+    if (result < 0) {
+        log_error("MUSIC", "[WASM] Failed to get scan results");
+        return mcp_error(-1, "Failed to get scan results");
+    }
+    
+    log_info("MUSIC", "[WASM] Scan complete");
+    
+    // Escape JSON for plain text response (replace " with \")
+    char escaped_buffer[1024] = {0};
+    int src = 0, dst = 0;
+    while (scan_buffer[src] && dst < sizeof(escaped_buffer) - 2) {
+        if (scan_buffer[src] == '"') {
+            escaped_buffer[dst++] = '\\';
+            escaped_buffer[dst++] = '"';
+        } else {
+            escaped_buffer[dst++] = scan_buffer[src];
+        }
+        src++;
+    }
+    escaped_buffer[dst] = '\0';
+    
+    // Return the escaped scan results
+    return mcp_success(escaped_buffer);
+}
+
 // MCP Tool registration
 static mcp_tool_t music_tools[] = {
     {
@@ -522,17 +583,29 @@ static mcp_tool_t music_tools[] = {
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
         .handler = stop_music_handler
     },
+    // {
+    //     .name = "set_volume",
+    //     .description = "Set playback volume (0-100)",
+    //     .input_schema = "{\"type\":\"object\",\"properties\":{\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"volume\"]}",
+    //     .handler = set_volume_handler
+    // },
+    // {
+    //     .name = "test_tone",
+    //     .description = "Generate continuous test tone for debugging (oscilloscope testing)",
+    //     .input_schema = "{\"type\":\"object\",\"properties\":{\"frequency\":{\"type\":\"integer\",\"description\":\"Test frequency in Hz (100-5000)\",\"minimum\":100,\"maximum\":5000},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}}}",
+    //     .handler = test_tone_handler
+    // },
     {
-        .name = "set_volume",
-        .description = "Set playback volume (0-100)",
-        .input_schema = "{\"type\":\"object\",\"properties\":{\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"volume\"]}",
-        .handler = set_volume_handler
+        .name = "bluetooth_init",
+        .description = "Initialize Bluetooth stack for wireless audio output",
+        .input_schema = "{\"type\":\"object\",\"properties\":{}}",
+        .handler = bluetooth_init_handler
     },
     {
-        .name = "test_tone",
-        .description = "Generate continuous test tone for debugging (oscilloscope testing)",
-        .input_schema = "{\"type\":\"object\",\"properties\":{\"frequency\":{\"type\":\"integer\",\"description\":\"Test frequency in Hz (100-5000)\",\"minimum\":100,\"maximum\":5000},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}}}",
-        .handler = test_tone_handler
+        .name = "bluetooth_scan",
+        .description = "Scan for nearby Bluetooth audio devices (speakers/headphones)",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"timeout\":{\"type\":\"integer\",\"description\":\"Scan duration in seconds (1-30)\",\"minimum\":1,\"maximum\":30}}}",
+        .handler = bluetooth_scan_handler
     }
 };
 

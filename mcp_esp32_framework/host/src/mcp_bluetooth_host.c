@@ -42,6 +42,20 @@ int32_t bluetooth_init(void) {
     
     // Initialize and enable Bluetooth controller
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    
+    // Configure for Classic Bluetooth only (A2DP) to reduce memory usage
+    bt_cfg.mode = ESP_BT_MODE_CLASSIC_BT;
+    
+    // Memory optimizations for Classic BT only
+    // bt_cfg.ble_max_conn = 0;                    // No BLE connections needed
+    bt_cfg.bt_max_acl_conn = 1;                 // Only need 1 ACL connection for A2DP
+    // bt_cfg.bt_max_sync_conn = 0;                // No SCO connections needed for A2DP
+    // bt_cfg.normal_adv_size = 0;                 // No BLE advertising
+    // bt_cfg.mesh_adv_size = 0;                   // No mesh support
+    // bt_cfg.controller_task_stack_size = 2048;   // Reduce controller task stack (default ~4KB)
+    
+    ESP_LOGI(TAG, "Bluetooth controller config: Classic only, 1 ACL conn, %d stack", bt_cfg.controller_task_stack_size);
+    
     ret = esp_bt_controller_init(&bt_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Bluetooth controller init failed: %s", esp_err_to_name(ret));

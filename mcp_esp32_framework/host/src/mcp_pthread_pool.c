@@ -53,7 +53,7 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
     // Create worker pthreads with larger stack size
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 32768); // 32KB stack 32768
+    pthread_attr_setstacksize(&attr, 16384); // 32KB stack 32768
 
     // Currently with a 32KB stack the ESP32-WROVER-E supports 2 worker threads
 
