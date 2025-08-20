@@ -310,3 +310,215 @@
   This absolutely elevates your demo from "ESP32 plays beeps" to "AI controls your home audio system"!
 
   Ready to start implementing? I'd suggest beginning with a simple A2DP test outside of WASM first to verify the Bluetooth audio path works.
+
+  ------
+
+   Summary
+
+  We've successfully completed the first phase of Bluetooth integration:
+
+  ✅ Phase 1: ESP32 Bluetooth Stack Setup
+  - Added bt component to CMakeLists.txt
+  - Configured Bluetooth settings in sdkconfig.defaults:
+    - Classic Bluetooth + A2DP enabled
+    - Bluetooth allocated from PSRAM first (memory efficiency)
+    - Proper core assignment and stack sizes
+  - Build completed successfully - ESP32 firmware now includes full Bluetooth stack
+  - Added Bluetooth host function interfaces to mcp_sdk.h
+
+  Next Steps:
+  - Create host function implementations in the main ESP32 code
+  - Implement basic bluetooth_init function first
+  - Add scan/pair/connect functionality progressively
+  - Create MCP tools that call these functions
+
+  The foundation is now ready! The Bluetooth stack is compiled into the firmware and consuming about 100-150KB of memory (which our 4MB PSRAM handles
+  easily).
+
+  Would you like me to continue with implementing the actual host functions, starting with bluetooth_init()?
+
+> Great!  Let's move on to the host function implementations.  Let's discuss first before changing anything.
+  ⎿  Found 55 new diagnostic issues in 1 file (ctrl-r to expand)
+
+● Perfect! Let's discuss the host function implementation strategy before coding. Here's how I think we should approach this:
+
+  Host Function Implementation Architecture
+
+  1. File Structure
+
+  We should create a new source file specifically for Bluetooth functions:
+  - /mcp_esp32_framework/host/src/mcp_bluetooth_host.c - All Bluetooth host function implementations
+  - Keep the existing /mcp_esp32_framework/host/src/mcp_host_functions.c for I2S and other functions
+  The host functions registration happens in:
+  /mcp_esp32_framework/host/src/mcp_host_functions.c
+
+  Where we'll add the Bluetooth function exports to WAMR:
+  #include "mcp_bluetooth_host.h"
+
+  static NativeSymbol host_functions[] = {
+      // ... existing I2S functions ...
+      {"bluetooth_init", bluetooth_init, "()i", NULL},
+      {"bluetooth_scan_start", bluetooth_scan_start, "(i)i", NULL},
+      // ... other BT functions ...
+  };
+  - This separation keeps the code organized and manageable
+
+  2. State Management
+
+  We need to track several pieces of Bluetooth state:
+  // Global state variables
+  static bool bluetooth_initialized = false;
+  static bool bluetooth_connected = false;
+  static char connected_device_name[64];
+  static esp_bd_addr_t connected_device_addr;
+  static bool scanning_active = false;
+  static esp_bd_addr_t discovered_devices[10];  // Max 10 devices
+  static char discovered_device_names[10][64];
+  static int discovered_device_count = 0;
+
+  3. Implementation Phases
+
+  Phase A: Basic Infrastructure
+  - bluetooth_init() - Initialize BT stack, register callbacks
+  - bluetooth_deinit() - Cleanup
+  - Basic state management
+
+  Phase B: Discovery & Connection
+  - bluetooth_scan_start() - Start device discovery
+  - bluetooth_scan_get_results() - Return discovered devices as JSON
+  - bluetooth_pair_device() - Pair with device by name
+  - Connection management
+
+  Phase C: Audio Integration
+  - A2DP sink setup
+  - bluetooth_play_tone() / bluetooth_play_melody()
+  - Audio routing from existing I2S functions
+
+  4. ESP-IDF Integration Points
+
+  We'll need to use these ESP-IDF APIs:
+  #include "esp_bt.h"
+  #include "esp_bt_main.h" 
+  #include "esp_gap_bt_api.h"
+  #include "esp_a2dp_api.h"
+  #include "esp_avrc_api.h"
+
+  Key ESP-IDF functions:
+  - esp_bluedroid_init() - Initialize Bluetooth stack
+  - esp_gap_bt_start_discovery() - Device scanning
+  - esp_a2dp_sink_init() - A2DP audio sink setup
+  - Various callback registrations
+
+  5. Callback Architecture
+
+  ESP-IDF Bluetooth is heavily callback-driven. We need:
+  // GAP callbacks (device discovery, pairing)
+  static void gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
+
+  // A2DP callbacks (audio connection, data)  
+  static void a2dp_callback(esp_a2dp_cb_event_t event, esp_a2dp_cb_param_t *param);
+
+  // AVRC callbacks (remote control)
+  static void avrc_callback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param);
+
+  6. Error Handling Strategy
+
+  Return codes that map to MCP errors:
+  - 0 = Success
+  - -1 = Not initialized
+  - -2 = Already connected/scanning
+  - -3 = Device not found
+  - -4 = Connection failed
+  - -5 = Audio error
+
+  7. WASM Integration Approach
+
+  The WASM functions will be simple wrappers:
+  // In WASM tool handlers
+  int32_t bluetooth_scan_handler(const char* params) {
+      // 1. Parse timeout from params
+      // 2. Call bluetooth_scan_start(timeout)  
+      // 3. Wait or return immediately
+      // 4. Call bluetooth_scan_get_results(buffer)
+      // 5. Return JSON result
+  }
+
+  Key Design Questions:
+
+  1. Synchronous vs Asynchronous
+
+  - Option A: Make MCP tools synchronous - bluetooth_scan blocks until complete
+  - Option B: Make them asynchronous - separate bluetooth_scan_start and bluetooth_scan_status tools
+
+  My recommendation: Start with synchronous for simplicity. The LLM can handle a 10-30 second scan delay.
+
+  2. Audio Routing
+
+  - Option A: Modify existing play_melody to detect output mode
+  - Option B: Create separate bluetooth_play_melody tools
+  - Option C: Add set_audio_output tool to switch modes
+
+  My recommendation: Option C - Clean separation with explicit output switching.
+
+  3. Device Management
+
+  - Option A: Auto-pair with any discovered device
+  - Option B: Require explicit pairing by device name
+  - Option C: Support both modes
+
+  My recommendation: Option B initially - explicit pairing is safer and more predictable.
+
+  4. Memory Management
+
+  - Store scan results in static arrays (simpler)
+  - Use dynamic allocation for device lists (more flexible)
+
+  My recommendation: Static arrays initially - we'll only have a few devices typically.
+
+  Implementation Order
+
+  1. Basic init/deinit - Get BT stack running
+  2. Device scanning - Discover nearby speakers
+  3. Pairing/connection - Connect to specific device
+  4. A2DP sink - Receive audio capability
+  5. Audio routing - Route melodies through BT
+  6. MCP tool integration - WASM tools calling host functions
+
+  Questions for You:
+
+  1. Synchronous vs async - Do you prefer tools that block until complete, or separate start/status tools?
+  2. Audio switching - Should we auto-detect the best output, or require explicit switching?
+  3. Error verbosity - Simple error codes, or detailed error messages for the LLM?
+  4. Testing approach - Should we build this incrementally and test each phase?
+
+  What are your thoughts on this approach? Any changes or preferences before we start implementing?
+
+  Corrected File Structure
+
+  Framework Files (Reusable Components)
+
+  - /mcp_esp32_framework/host/src/mcp_bluetooth_host.c - Bluetooth implementation
+  - /mcp_esp32_framework/host/include/mcp_bluetooth_host.h - Bluetooth header
+  - /mcp_esp32_framework/host/src/mcp_host_functions.c - Existing I2S functions (add BT calls)
+  - /mcp_esp32_framework/host/src/mcp_pthread_handler.c - MCP HTTP handlers (existing)
+
+  Application Files (Main ESP32 App)
+
+  - /main/main.c - Links to framework functions
+
+  Integration Points
+
+  The host functions registration happens in:
+  /mcp_esp32_framework/host/src/mcp_host_functions.c
+
+  Where we'll add the Bluetooth function exports to WAMR:
+  #include "mcp_bluetooth_host.h"
+
+  static NativeSymbol host_functions[] = {
+      // ... existing I2S functions ...
+      {"bluetooth_init", bluetooth_init, "()i", NULL},
+      {"bluetooth_scan_start", bluetooth_scan_start, "(i)i", NULL},
+      // ... other BT functions ...
+  };
+
+  This keeps everything properly organized within the framework structure.

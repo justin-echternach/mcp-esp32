@@ -1,0 +1,418 @@
+#include "mcp_bluetooth_host.h"
+#include "esp_log.h"
+#include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/event_groups.h"
+#include <string.h>
+#include <stdio.h>
+#include <inttypes.h>
+
+static const char* TAG = "BT_HOST";
+
+// Global Bluetooth state
+static bt_state_t g_bt_state = {0};
+
+// Event group for synchronizing operations
+static EventGroupHandle_t bt_event_group = NULL;
+#define BT_SCAN_COMPLETE_BIT    BIT0
+#define BT_PAIR_COMPLETE_BIT    BIT1
+#define BT_CONNECT_COMPLETE_BIT BIT2
+
+// Initialize Bluetooth stack
+int32_t bluetooth_init(void) {
+    ESP_LOGI(TAG, "Initializing Bluetooth stack");
+    
+    if (g_bt_state.initialized) {
+        ESP_LOGW(TAG, "Bluetooth already initialized");
+        return 0;
+    }
+    
+    esp_err_t ret;
+    
+    // Initialize event group
+    bt_event_group = xEventGroupCreate();
+    if (!bt_event_group) {
+        ESP_LOGE(TAG, "Failed to create event group");
+        return -1;
+    }
+    
+    // Initialize NVS for Bluetooth (required for pairing info storage)
+    // Note: This assumes NVS was already initialized in main()
+    
+    // Initialize and enable Bluetooth controller
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluetooth controller init failed: %s", esp_err_to_name(ret));
+        return -2;
+    }
+    
+    ret = esp_bt_controller_enable(ESP_BT_MODE_CLASSIC_BT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluetooth controller enable failed: %s", esp_err_to_name(ret));
+        return -3;
+    }
+    
+    // Initialize Bluedroid stack
+    ret = esp_bluedroid_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+        return -4;
+    }
+    
+    ret = esp_bluedroid_enable();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+        return -5;
+    }
+    
+    // Register GAP callback for device discovery and pairing
+    ret = esp_bt_gap_register_callback(bt_gap_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GAP register callback failed: %s", esp_err_to_name(ret));
+        return -6;
+    }
+    
+    // Initialize A2DP sink
+    ret = esp_a2d_register_callback(bt_a2dp_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "A2DP register callback failed: %s", esp_err_to_name(ret));
+        return -7;
+    }
+    
+    ret = esp_a2d_sink_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "A2DP sink init failed: %s", esp_err_to_name(ret));
+        return -8;
+    }
+    
+    // Initialize AVRC controller
+    ret = esp_avrc_ct_register_callback(bt_avrc_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "AVRC register callback failed: %s", esp_err_to_name(ret));
+        return -9;
+    }
+    
+    ret = esp_avrc_ct_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "AVRC init failed: %s", esp_err_to_name(ret));
+        return -10;
+    }
+    
+    // Set default GAP parameters
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    
+    // Initialize state
+    g_bt_state.initialized = true;
+    g_bt_state.state = BT_STATE_IDLE;
+    g_bt_state.discovered_device_count = 0;
+    g_bt_state.a2dp_connected = false;
+    g_bt_state.current_volume = 50; // Default volume
+    memset(g_bt_state.connected_device_name, 0, sizeof(g_bt_state.connected_device_name));
+    
+    ESP_LOGI(TAG, "Bluetooth stack initialized successfully");
+    return 0;
+}
+
+// Deinitialize Bluetooth stack
+int32_t bluetooth_deinit(void) {
+    ESP_LOGI(TAG, "Deinitializing Bluetooth stack");
+    
+    if (!g_bt_state.initialized) {
+        return 0;
+    }
+    
+    // Disconnect if connected
+    if (g_bt_state.state == BT_STATE_CONNECTED) {
+        bluetooth_disconnect();
+    }
+    
+    // Deinitialize components in reverse order
+    esp_avrc_ct_deinit();
+    esp_a2d_sink_deinit();
+    esp_bluedroid_disable();
+    esp_bluedroid_deinit();
+    esp_bt_controller_disable();
+    esp_bt_controller_deinit();
+    
+    // Clean up event group
+    if (bt_event_group) {
+        vEventGroupDelete(bt_event_group);
+        bt_event_group = NULL;
+    }
+    
+    // Reset state
+    memset(&g_bt_state, 0, sizeof(g_bt_state));
+    
+    ESP_LOGI(TAG, "Bluetooth stack deinitialized");
+    return 0;
+}
+
+// Start device scanning
+int32_t bluetooth_scan_start(int32_t timeout_sec) {
+    ESP_LOGI(TAG, "Starting device scan for %d seconds", timeout_sec);
+    
+    if (!g_bt_state.initialized) {
+        ESP_LOGE(TAG, "Bluetooth not initialized");
+        return -1;
+    }
+    
+    if (g_bt_state.state == BT_STATE_SCANNING) {
+        ESP_LOGW(TAG, "Scan already in progress");
+        return -2;
+    }
+    
+    // Limit timeout to reasonable range
+    if (timeout_sec < 1 || timeout_sec > 30) {
+        timeout_sec = 10;
+    }
+    
+    // Clear previous scan results
+    g_bt_state.discovered_device_count = 0;
+    memset(g_bt_state.discovered_devices, 0, sizeof(g_bt_state.discovered_devices));
+    
+    // Clear scan complete bit
+    xEventGroupClearBits(bt_event_group, BT_SCAN_COMPLETE_BIT);
+    
+    // Set scanning state
+    g_bt_state.state = BT_STATE_SCANNING;
+    
+    // Start discovery
+    esp_err_t ret = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, timeout_sec, 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Start discovery failed: %s", esp_err_to_name(ret));
+        g_bt_state.state = BT_STATE_IDLE;
+        return -3;
+    }
+    
+    // Wait for scan to complete
+    EventBits_t bits = xEventGroupWaitBits(bt_event_group, BT_SCAN_COMPLETE_BIT, 
+                                          pdTRUE, pdFALSE, pdMS_TO_TICKS((timeout_sec + 2) * 1000));
+    
+    if (!(bits & BT_SCAN_COMPLETE_BIT)) {
+        ESP_LOGW(TAG, "Scan timeout");
+        esp_bt_gap_cancel_discovery();
+    }
+    
+    g_bt_state.state = BT_STATE_IDLE;
+    ESP_LOGI(TAG, "Scan completed. Found %d devices", g_bt_state.discovered_device_count);
+    
+    return 0;
+}
+
+// Get scan results as JSON
+int32_t bluetooth_scan_get_results(char* buffer, int32_t max_len) {
+    if (!buffer || max_len < 1) {
+        return -1;
+    }
+    
+    if (!g_bt_state.initialized) {
+        snprintf(buffer, max_len, "{\"error\":\"Bluetooth not initialized\"}");
+        return -1;
+    }
+    
+    // Start JSON array
+    int offset = snprintf(buffer, max_len, "{\"devices\":[");
+    if (offset >= max_len) return -2;
+    
+    for (int i = 0; i < g_bt_state.discovered_device_count && offset < max_len - 100; i++) {
+        bt_discovered_device_t* dev = &g_bt_state.discovered_devices[i];
+        
+        // Add comma for subsequent entries
+        if (i > 0) {
+            offset += snprintf(buffer + offset, max_len - offset, ",");
+        }
+        
+        // Add device entry
+        offset += snprintf(buffer + offset, max_len - offset,
+            "{\"name\": \"%s\", \"address\": \"%s\", \"rssi\": %"PRId32", \"audio_device\": %s}",
+            dev->name[0] ? dev->name : "Unknown",
+            bt_addr_to_string(dev->addr),
+            dev->rssi,
+            dev->is_audio_device ? "true" : "false"
+        );
+    }
+    
+    // Close JSON
+    offset += snprintf(buffer + offset, max_len - offset, "],\"count\":%d}", 
+                      g_bt_state.discovered_device_count);
+    
+    return 0;
+}
+
+// Check if connected
+int32_t bluetooth_is_connected(void) {
+    return g_bt_state.state == BT_STATE_CONNECTED ? 1 : 0;
+}
+
+// Get connected device name
+int32_t bluetooth_get_connected_device_name(char* buffer, int32_t max_len) {
+    if (!buffer || max_len < 1) {
+        return -1;
+    }
+    
+    if (g_bt_state.state != BT_STATE_CONNECTED) {
+        buffer[0] = '\0';
+        return -1;
+    }
+    
+    strncpy(buffer, g_bt_state.connected_device_name, max_len - 1);
+    buffer[max_len - 1] = '\0';
+    
+    return 0;
+}
+
+// Utility: Convert Bluetooth address to string
+const char* bt_addr_to_string(esp_bd_addr_t addr) {
+    static char addr_str[18];
+    snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    return addr_str;
+}
+
+// Find device by name in discovered devices
+int32_t bt_find_device_by_name(const char* device_name) {
+    if (!device_name) return -1;
+    
+    for (int i = 0; i < g_bt_state.discovered_device_count; i++) {
+        if (strstr(g_bt_state.discovered_devices[i].name, device_name) != NULL) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// GAP callback for device discovery and pairing events
+void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
+    switch (event) {
+    case ESP_BT_GAP_DISC_RES_EVT: {
+        // Device discovered during scan
+        esp_bt_gap_dev_prop_t *prop = NULL;
+        char device_name[MAX_DEVICE_NAME_LEN] = {0};
+        bool is_audio_device = false;
+        int32_t rssi = -128; // Default value if not found
+        
+        // Check if we have room for more devices
+        if (g_bt_state.discovered_device_count >= MAX_DISCOVERED_DEVICES) {
+            break;
+        }
+        
+        // Extract device properties
+        for (int i = 0; i < param->disc_res.num_prop; i++) {
+            prop = param->disc_res.prop + i;
+            switch (prop->type) {
+            case ESP_BT_GAP_DEV_PROP_BDNAME:
+                memcpy(device_name, prop->val, prop->len);
+                device_name[prop->len] = '\0';
+                break;
+            case ESP_BT_GAP_DEV_PROP_COD: {
+                uint32_t cod = *(uint32_t *)(prop->val);
+                // Check for audio device class (major service class audio bit)
+                is_audio_device = (cod & 0x200000) != 0;  
+                break;
+            }
+            case ESP_BT_GAP_DEV_PROP_RSSI:
+                rssi = *(int8_t *)(prop->val);
+                break;
+            default:
+                break;
+            }
+        }
+        
+        // Store discovered device
+        bt_discovered_device_t* dev = &g_bt_state.discovered_devices[g_bt_state.discovered_device_count];
+        memcpy(dev->addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
+        strncpy(dev->name, device_name, sizeof(dev->name) - 1);
+        dev->rssi = rssi;
+        dev->is_audio_device = is_audio_device;
+        
+        g_bt_state.discovered_device_count++;
+        
+        ESP_LOGI(TAG, "Device found: %s (%s) RSSI:%"PRId32" Audio:%s",
+                 device_name, bt_addr_to_string(dev->addr), dev->rssi,
+                 is_audio_device ? "Yes" : "No");
+        break;
+    }
+    case ESP_BT_GAP_DISC_STATE_CHANGED_EVT:
+        // Discovery state changed
+        if (param->disc_st_chg.state == ESP_BT_GAP_DISCOVERY_STOPPED) {
+            ESP_LOGI(TAG, "Device discovery stopped");
+            xEventGroupSetBits(bt_event_group, BT_SCAN_COMPLETE_BIT);
+        }
+        break;
+    default:
+        ESP_LOGD(TAG, "GAP event: %d", event);
+        break;
+    }
+}
+
+// A2DP callback for audio events
+void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
+    switch (event) {
+    case ESP_A2D_CONNECTION_STATE_EVT:
+        if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+            ESP_LOGI(TAG, "A2DP connected");
+            g_bt_state.a2dp_connected = true;
+        } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+            ESP_LOGI(TAG, "A2DP disconnected");
+            g_bt_state.a2dp_connected = false;
+        }
+        break;
+    case ESP_A2D_AUDIO_STATE_EVT:
+        ESP_LOGI(TAG, "A2DP audio state: %s", 
+                 param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED ? "Started" : "Stopped");
+        break;
+    default:
+        ESP_LOGD(TAG, "A2DP event: %d", event);
+        break;
+    }
+}
+
+// AVRC callback for remote control events  
+void bt_avrc_callback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param) {
+    switch (event) {
+    case ESP_AVRC_CT_CONNECTION_STATE_EVT:
+        ESP_LOGI(TAG, "AVRC connection state: %d", param->conn_stat.connected);
+        break;
+    default:
+        ESP_LOGD(TAG, "AVRC event: %d", event);
+        break;
+    }
+}
+
+// Placeholder implementations for functions we'll implement later
+int32_t bluetooth_pair_device(const char* device_name) {
+    ESP_LOGI(TAG, "Pair device: %s (not yet implemented)", device_name);
+    return -1; // Not implemented yet
+}
+
+int32_t bluetooth_connect_device(const char* device_address) {
+    ESP_LOGI(TAG, "Connect device: %s (not yet implemented)", device_address);
+    return -1; // Not implemented yet
+}
+
+int32_t bluetooth_disconnect(void) {
+    ESP_LOGI(TAG, "Disconnect (not yet implemented)");
+    return -1; // Not implemented yet
+}
+
+int32_t bluetooth_get_connected_device_address(char* buffer, int32_t max_len) {
+    ESP_LOGI(TAG, "Get connected device address (not yet implemented)");
+    return -1; // Not implemented yet
+}
+
+int32_t bluetooth_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent) {
+    ESP_LOGI(TAG, "Play tone via Bluetooth (not yet implemented)");
+    return -1; // Not implemented yet
+}
+
+int32_t bluetooth_play_melody(const char* melody_str, int32_t volume_percent) {
+    ESP_LOGI(TAG, "Play melody via Bluetooth (not yet implemented)");
+    return -1; // Not implemented yet  
+}
+
+int32_t bluetooth_set_volume(int32_t volume_percent) {
+    ESP_LOGI(TAG, "Set Bluetooth volume to %d%% (not yet implemented)", volume_percent);
+    return -1; // Not implemented yet
+}

@@ -3,6 +3,7 @@
 #include "mcp_config_loader.h"
 #include "mcp_session_manager.h"
 #include "mcp_pthread_pool.h"
+#include "mcp_bluetooth_host.h"
 #include <string.h>
 #include <stdio.h>
 #include <ctype.h>
@@ -1073,7 +1074,7 @@ static TaskHandle_t i2s_task_handle = NULL;
 #define I2S_DATA_PIN 25 // Data Input (DIN)
 
 // Audio generation parameters
-#define I2S_SAMPLE_BUFFER_SIZE 256  // Increased from 16 for smoother playback
+#define I2S_SAMPLE_BUFFER_SIZE 64  // Increased from 16 for smoother playback
 #define I2S_DMA_DESC_NUM 32   // was 8
 #define I2S_DMA_FRAME_NUM 512 // was 64
 #define SINE_TABLE_SIZE 1024
@@ -2069,17 +2070,14 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
     BaseType_t task_ret = xTaskCreatePinnedToCore(
         i2s_audio_task,
         "i2s_audio",
-        8192,
+        4096,
         NULL,
         20,
         &i2s_task_handle,
         1);
 
-    if (task_ret != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create I2S audio task");
-        i2s_playing = false;
-        return -4;
+    if (task_ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create I2S melody task, error code: %d", (int)task_ret);
     }
 
     // Set duration timer if specified
@@ -2240,14 +2238,21 @@ int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str,
     BaseType_t task_ret = xTaskCreatePinnedToCore(
         i2s_melody_task,
         "i2s_melody",
-        8192,
+        2048,
         NULL,
         20,
         &i2s_task_handle,
         1);
     
     if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create I2S melody task");
+        ESP_LOGE(TAG, "Failed to create I2S melody task, error code: %d", (int)task_ret);
+        // Additionally, let's check available memory:
+        ESP_LOGE(TAG, "Free heap: %d bytes", heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+        ESP_LOGE(TAG, "Largest free block: %d bytes", heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
+        ESP_LOGE(TAG, "Current task count: %d", uxTaskGetNumberOfTasks());
+        ESP_LOGE(TAG, "Internal DRAM free: %d bytes", heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+        ESP_LOGE(TAG, "Internal DRAM largest block: %d bytes", heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+
         heap_caps_free(notes);
         melody_state.notes = NULL;
         melody_state.is_playing = false;
@@ -2329,6 +2334,21 @@ NativeSymbol mcp_core_host_functions[] = {
     {"i2s_set_envelope", native_i2s_set_envelope, "(iii)i", NULL},
     {"i2s_play_melody", native_i2s_play_melody, "($i)i", NULL},
     {"i2s_stop_melody", native_i2s_stop_melody, "()i", NULL},
+
+    // Bluetooth Audio Control (A2DP sink for wireless speakers/headphones)
+    {"bluetooth_init", bluetooth_init, "()i", NULL},
+    {"bluetooth_deinit", bluetooth_deinit, "()i", NULL},
+    {"bluetooth_scan_start", bluetooth_scan_start, "(i)i", NULL},
+    {"bluetooth_scan_get_results", bluetooth_scan_get_results, "(*~)i", NULL},
+    {"bluetooth_pair_device", bluetooth_pair_device, "($)i", NULL},
+    {"bluetooth_connect_device", bluetooth_connect_device, "($)i", NULL},
+    {"bluetooth_disconnect", bluetooth_disconnect, "()i", NULL},
+    {"bluetooth_is_connected", bluetooth_is_connected, "()i", NULL},
+    {"bluetooth_get_connected_device_name", bluetooth_get_connected_device_name, "(*~)i", NULL},
+    {"bluetooth_get_connected_device_address", bluetooth_get_connected_device_address, "(*~)i", NULL},
+    {"bluetooth_play_tone", bluetooth_play_tone, "(iii)i", NULL},
+    {"bluetooth_play_melody", bluetooth_play_melody, "($i)i", NULL},
+    {"bluetooth_set_volume", bluetooth_set_volume, "(i)i", NULL},
 
     // SSE Events (MCP Protocol)
     {"sse_send_event", native_sse_send_event, "($$)i", NULL},

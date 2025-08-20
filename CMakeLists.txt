@@ -5,7 +5,7 @@
 cmake_minimum_required(VERSION 3.14)
 
 # Add WAMR as a component
-set(COMPONENTS main freertos esptool_py wamr esp_psram)
+set(COMPONENTS main freertos esptool_py wamr esp_psram bt)
 
 # Set WAMR path - you may need to adjust this path
 if(DEFINED ENV{WAMR_PATH})

@@ -53,7 +53,7 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
     // Create worker pthreads with larger stack size
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 32768); // 32KB stack
+    pthread_attr_setstacksize(&attr, 32768); // 32KB stack 32768
 
     // Currently with a 32KB stack the ESP32-WROVER-E supports 2 worker threads
 
@@ -333,7 +333,7 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
     // ESP_LOGI(TAG, "WASM memory range: success=%d, start=%llu, end=%llu, size=%llu",
     //          success, app_start_offset, app_end_offset, app_end_offset - app_start_offset);
     // Clear request context after WASM execution
-    mcp_host_clear_request_context(); // DEBUGGING: Commenting out to test if this breaks function lookup
+    
 
     ESP_LOGI(TAG, "🔍 DEBUG: WASM call result: %s", call_success ? "SUCCESS" : "FAILED");
 
@@ -378,6 +378,7 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
 
     ESP_LOGI(TAG, "✅ MCP request processed successfully in main thread runtime: %s", req->response);
 
+    mcp_host_clear_request_context(); // DEBUGGING: Commenting out to test if this breaks function lookup
     // Clear session context for this thread
     mcp_session_clear_current();
 
@@ -406,7 +407,7 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     if (ret <= 0)
     {
         ESP_LOGE(TAG, "Failed to receive request body");
-        free(content);
+        mcp_free(content);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read request");
         return ESP_FAIL;
     }
@@ -419,7 +420,7 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     if (!mcp_req)
     {
         ESP_LOGE(TAG, "Failed to allocate MCP request");
-        free(content);
+        mcp_free(content);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
         return ESP_FAIL;
     }
@@ -428,7 +429,15 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     mcp_req->response = mcp_malloc(resp_buffer_size);
 
     // Extract important headers for WASM access (limited set for security/size)
-    char header_buffer[1024] = {0};
+    int32_t header_buffer_size = 1024;
+    char *header_buffer = mcp_malloc(header_buffer_size);
+    if (!header_buffer) {
+        // Handle allocation failure
+        mcp_free(content);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+        return ESP_FAIL;
+    }
+    memset(header_buffer, 0, header_buffer_size);
     size_t header_len = 0;
 
     // List of headers to extract (case will be preserved from ESP-IDF)
@@ -441,25 +450,49 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
         "X-Request-ID",   // Request tracing
         NULL};
 
-    for (int i = 0; important_headers[i] != NULL && header_len < sizeof(header_buffer) - 100; i++)
+    for (int i = 0; important_headers[i] != NULL && header_len < header_buffer_size - 100; i++)
     {
-        char header_value[256];
-        if (httpd_req_get_hdr_value_str(req, important_headers[i], header_value, sizeof(header_value)) == ESP_OK)
+        char *header_value = mcp_malloc(256);
+        if (!header_value) {
+            ESP_LOGE(TAG, "Failed to allocate header_value buffer");
+            mcp_free(header_buffer);
+            mcp_free(content);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
+            return ESP_FAIL;
+        }
+        
+        if (httpd_req_get_hdr_value_str(req, important_headers[i], header_value, 256) == ESP_OK)
         {
-            int added = snprintf(header_buffer + header_len, sizeof(header_buffer) - header_len,
+            int added = snprintf(header_buffer + header_len, header_buffer_size - header_len,
                                  "%s: %s\r\n", important_headers[i], header_value);
-            if (added > 0 && header_len + added < sizeof(header_buffer))
+            if (added > 0 && header_len + added < header_buffer_size)
             {
                 header_len += added;
             }
         }
+        mcp_free(header_value);
     }
 
     // Initialize request structure
     mcp_req->request_body = content;
     mcp_req->request_len = ret;
-    mcp_req->uri = strdup(req->uri);
-    mcp_req->headers = header_len > 0 ? strdup(header_buffer) : NULL;
+    
+    // Use mcp_malloc instead of strdup to avoid allocator mismatch
+    size_t uri_len = strlen(req->uri) + 1;
+    mcp_req->uri = mcp_malloc(uri_len);
+    if (mcp_req->uri) {
+        memcpy(mcp_req->uri, req->uri, uri_len);
+    }
+    
+    // Use mcp_malloc instead of strdup for headers too
+    if (header_len > 0) {
+        mcp_req->headers = mcp_malloc(header_len + 1);
+        if (mcp_req->headers) {
+            memcpy(mcp_req->headers, header_buffer, header_len + 1);
+        }
+    } else {
+        mcp_req->headers = NULL;
+    }
 
     // Initialize response headers
     mcp_req->response_headers = NULL;
@@ -479,15 +512,17 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "Failed to queue MCP request - pool busy");
 
         // Cleanup
-        free(mcp_req->request_body);
-        free(mcp_req->uri);
+        mcp_free(mcp_req->response);
+        mcp_free(mcp_req->request_body);
+        mcp_free(mcp_req->uri);
         if (mcp_req->headers)
-            free(mcp_req->headers);
+            mcp_free(mcp_req->headers);
         if (mcp_req->response_headers)
-            free(mcp_req->response_headers);
+            mcp_free(mcp_req->response_headers);
         pthread_mutex_destroy(&mcp_req->completion_mutex);
         pthread_cond_destroy(&mcp_req->completion_cond);
-        free(mcp_req);
+        mcp_free(mcp_req);
+        mcp_free(header_buffer);
 
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Service busy");
         return ESP_FAIL;
@@ -511,23 +546,48 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
     {
         ESP_LOGE(TAG, "MCP request timeout or failed");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Request timeout");
+        
+        // Cleanup on timeout
+        mcp_free(mcp_req->response);
+        mcp_free(mcp_req->request_body);
+        mcp_free(mcp_req->uri);
+        if (mcp_req->headers)
+            mcp_free(mcp_req->headers);
+        if (mcp_req->response_headers)
+            mcp_free(mcp_req->response_headers);
+        pthread_mutex_destroy(&mcp_req->completion_mutex);
+        pthread_cond_destroy(&mcp_req->completion_cond);
+        mcp_free(mcp_req);
+        mcp_free(header_buffer);
+        return ESP_FAIL;
     }
     else
     {
         // Send response
+        //httpd_resp_set_status(req, "200 OK");
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
         httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 
         // Apply response headers set by WASM module
+        ESP_LOGI(TAG, "Response headers length: %d", mcp_req->response_headers_length);
+        if (mcp_req->response_headers) {
+            ESP_LOGI(TAG, "Response headers raw: %s", mcp_req->response_headers);
+        }
+        
+        // Track allocated header buffers to free after response is sent
+        #define MAX_RESPONSE_HEADERS 10
+        char *header_buffers[MAX_RESPONSE_HEADERS * 2] = {0}; // name,value pairs
+        int header_buffer_count = 0;
+        
         if (mcp_req->response_headers && mcp_req->response_headers_length > 0)
         {
-            ESP_LOGD(TAG, "Applying response headers: %s", mcp_req->response_headers);
+            ESP_LOGI(TAG, "Applying response headers: %s", mcp_req->response_headers);
 
             // Parse and apply headers from string buffer
             const char *pos = mcp_req->response_headers;
-            while (*pos)
+            while (*pos && header_buffer_count < MAX_RESPONSE_HEADERS * 2)
             {
                 // Find header name (before colon)
                 const char *colon = strchr(pos, ':');
@@ -536,11 +596,18 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
 
                 // Extract header name
                 size_t name_len = colon - pos;
-                char header_name[128];
-                if (name_len < sizeof(header_name))
+                
+                if (name_len > 0 && name_len < 128)
                 {
+                    // Allocate and copy header name
+                    char *header_name = mcp_malloc(name_len + 1);
+                    if (!header_name) {
+                        ESP_LOGE(TAG, "Failed to allocate header name");
+                        break;
+                    }
                     strncpy(header_name, pos, name_len);
                     header_name[name_len] = '\0';
+                    header_buffers[header_buffer_count++] = header_name;
 
                     // Find header value (after colon and whitespace)
                     const char *value = colon + 1;
@@ -552,15 +619,22 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
                     if (value_end)
                     {
                         size_t value_len = value_end - value;
-                        char header_value[256];
-                        if (value_len < sizeof(header_value))
+                        if (value_len < 256)
                         {
+                            // Allocate and copy header value
+                            char *header_value = mcp_malloc(value_len + 1);
+                            if (!header_value) {
+                                ESP_LOGE(TAG, "Failed to allocate header value");
+                                break;
+                            }
                             strncpy(header_value, value, value_len);
                             header_value[value_len] = '\0';
+                            header_buffers[header_buffer_count++] = header_value;
 
                             // Apply header to HTTP response
+                            // httpd_resp_set_hdr stores pointers, so we keep them allocated
                             httpd_resp_set_hdr(req, header_name, header_value);
-                            ESP_LOGD(TAG, "Applied header: %s = %s", header_name, header_value);
+                            ESP_LOGI(TAG, "Applied header: %s = %s", header_name, header_value);
                         }
                     }
                 }
@@ -573,21 +647,36 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
             }
         }
 
-        httpd_resp_send(req, mcp_req->response, strlen(mcp_req->response));
+        ESP_LOGI(TAG, "Sending MCP response: %s", mcp_req->response);
+        esp_err_t result = httpd_resp_send(req, mcp_req->response, strlen(mcp_req->response));
+
+        if(result != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Failed to send MCP response: %s", esp_err_to_name(result));
+        }
 
         ESP_LOGI(TAG, "MCP response sent: %s", mcp_req->response);
+        
+        // Now safe to free header buffers after response is sent
+        for (int i = 0; i < header_buffer_count; i++) {
+            if (header_buffers[i]) {
+                mcp_free(header_buffers[i]);
+            }
+        }
     }
 
     // Cleanup request structure
-    free(mcp_req->request_body);
-    free(mcp_req->uri);
+    mcp_free(mcp_req->response);
+    mcp_free(mcp_req->request_body);
+    mcp_free(mcp_req->uri);
     if (mcp_req->headers)
-        free(mcp_req->headers);
+        mcp_free(mcp_req->headers);
     if (mcp_req->response_headers)
-        free(mcp_req->response_headers);
+        mcp_free(mcp_req->response_headers);
     pthread_mutex_destroy(&mcp_req->completion_mutex);
     pthread_cond_destroy(&mcp_req->completion_cond);
-    free(mcp_req);
+    mcp_free(mcp_req);
+    mcp_free(header_buffer);
 
     return ESP_OK;
 }

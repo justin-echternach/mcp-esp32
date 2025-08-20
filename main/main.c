@@ -342,6 +342,7 @@ void iwasm_main(void *arg)
     
     // Initialize MCP pthread pool for concurrent request handling
     ESP_LOGI(TAG, "Initializing MCP pthread pool...");
+    
     if (mcp_pthread_pool_init(g_mcp_config.system.max_wasm_modules) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize MCP pthread pool");
         return;

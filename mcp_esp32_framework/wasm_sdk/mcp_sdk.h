@@ -108,6 +108,21 @@ extern int32_t i2s_set_envelope(int32_t attack_ms, int32_t release_ms, int32_t e
 extern int32_t i2s_play_melody(const char* melody_str, int32_t volume_percent);
 extern int32_t i2s_stop_melody(void);
 
+// Bluetooth Audio Control (A2DP sink for wireless speakers/headphones)
+extern int32_t bluetooth_init(void);
+extern int32_t bluetooth_deinit(void);
+extern int32_t bluetooth_scan_start(int32_t timeout_sec);
+extern int32_t bluetooth_scan_get_results(char* buffer, int32_t max_len);
+extern int32_t bluetooth_pair_device(const char* device_name);
+extern int32_t bluetooth_connect_device(const char* device_address);
+extern int32_t bluetooth_disconnect(void);
+extern int32_t bluetooth_is_connected(void);
+extern int32_t bluetooth_get_connected_device_name(char* buffer, int32_t max_len);
+extern int32_t bluetooth_get_connected_device_address(char* buffer, int32_t max_len);
+extern int32_t bluetooth_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
+extern int32_t bluetooth_play_melody(const char* melody_str, int32_t volume_percent);
+extern int32_t bluetooth_set_volume(int32_t volume_percent);
+
 // SSE Events
 extern int32_t sse_send_event(const char* event_type, const char* data);
 extern int32_t sse_send_tool_result(const char* tool_name, const char* result);
