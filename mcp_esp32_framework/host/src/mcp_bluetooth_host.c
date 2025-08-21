@@ -92,16 +92,16 @@ int32_t bluetooth_init(wasm_exec_env_t exec_env) {
         return -6;
     }
     
-    // Initialize A2DP sink
+    // Initialize A2DP source (to stream music TO speakers)
     ret = esp_a2d_register_callback(bt_a2dp_callback);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "A2DP register callback failed: %s", esp_err_to_name(ret));
         return -7;
     }
     
-    ret = esp_a2d_sink_init();
+    ret = esp_a2d_source_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "A2DP sink init failed: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "A2DP source init failed: %s", esp_err_to_name(ret));
         return -8;
     }
     
@@ -117,6 +117,31 @@ int32_t bluetooth_init(wasm_exec_env_t exec_env) {
         ESP_LOGE(TAG, "AVRC init failed: %s", esp_err_to_name(ret));
         return -10;
     }
+    
+    // Configure SSP (Secure Simple Pairing) for "Just Works" mode
+    ESP_LOGI(TAG, "Configuring SSP for 'Just Works' mode");
+    
+    // Set IO capability to NONE for "Just Works" - no display/input needed
+    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
+    esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(uint8_t));
+    
+    // Note: ESP-IDF Classic BT doesn't have separate auth_req settings for SSP
+    // The IO capability setting (ESP_BT_IO_CAP_NONE) is sufficient for Just Works mode
+    
+    // Keep legacy PIN as fallback for older devices
+    esp_bt_pin_type_t pin_type = ESP_BT_PIN_TYPE_FIXED;
+    esp_bt_pin_code_t pin_code = {'1', '2', '3', '4'};
+    esp_bt_gap_set_pin(pin_type, 4, pin_code);
+    ESP_LOGI(TAG, "SSP configured with fallback PIN: 1234");
+    
+    // Set device name for proper identification during pairing
+    const char* device_name = "ESP32-MusicPlayer";
+    ret = esp_bt_gap_set_device_name(device_name);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set device name: %s", esp_err_to_name(ret));
+        return -11;
+    }
+    ESP_LOGI(TAG, "Bluetooth device name set to: %s", device_name);
     
     // Set default GAP parameters
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
@@ -148,7 +173,7 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     
     // Deinitialize components in reverse order
     esp_avrc_ct_deinit();
-    esp_a2d_sink_deinit();
+    esp_a2d_source_deinit();
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
     esp_bt_controller_disable();
@@ -502,6 +527,61 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
             xEventGroupSetBits(bt_event_group, BT_SCAN_COMPLETE_BIT);
         }
         break;
+    
+    // SSP (Secure Simple Pairing) Events
+    case ESP_BT_GAP_CFM_REQ_EVT:
+        // SSP Numeric Comparison or Just Works - auto-confirm for Just Works mode
+        ESP_LOGI(TAG, "SSP Confirmation Request - Auto confirming (Just Works mode)");
+        ESP_LOGI(TAG, "Device: %s, Numeric Value: %"PRIu32, 
+                 bt_addr_to_string(param->cfm_req.bda), param->cfm_req.num_val);
+        
+        // Always confirm for "Just Works" mode
+        esp_bt_gap_ssp_confirm_reply(param->cfm_req.bda, true);
+        break;
+    
+    case ESP_BT_GAP_KEY_NOTIF_EVT:
+        // SSP Passkey Notification
+        ESP_LOGI(TAG, "SSP Passkey Notification: %06"PRIu32, param->key_notif.passkey);
+        // No action needed - just for user information
+        break;
+    
+    case ESP_BT_GAP_KEY_REQ_EVT:
+        // Legacy pairing or SSP passkey request
+        ESP_LOGI(TAG, "SSP Passkey Request - device may not support Just Works");
+        // This shouldn't happen with Just Works, but handle it anyway
+        // Could implement passkey entry here if needed
+        break;
+    
+    case ESP_BT_GAP_AUTH_CMPL_EVT:
+        // Authentication/Pairing complete
+        if (param->auth_cmpl.stat == ESP_BT_STATUS_SUCCESS) {
+            ESP_LOGI(TAG, "✅ Authentication SUCCESS with %s", 
+                     bt_addr_to_string(param->auth_cmpl.bda));
+            ESP_LOGI(TAG, "Device name: %s", param->auth_cmpl.device_name);
+            ESP_LOGI(TAG, "Link key type: %d", param->auth_cmpl.lk_type);
+            
+            // Update state if this was part of connection process
+            if (g_bt_state.state == BT_STATE_CONNECTING) {
+                ESP_LOGI(TAG, "Pairing successful during connection");
+                // A2DP connection should proceed automatically after successful pairing
+            }
+        } else {
+            ESP_LOGE(TAG, "❌ Authentication FAILED with %s, status: %d", 
+                     bt_addr_to_string(param->auth_cmpl.bda), param->auth_cmpl.stat);
+            
+            // If we were trying to connect, mark as failed
+            if (g_bt_state.state == BT_STATE_CONNECTING) {
+                g_bt_state.state = BT_STATE_IDLE;
+                xEventGroupSetBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
+            }
+        }
+        break;
+    
+    case ESP_BT_GAP_MODE_CHG_EVT:
+        // GAP mode change event (power save mode changes)
+        ESP_LOGD(TAG, "GAP mode changed: mode %d", param->mode_chg.mode);
+        break;
+    
     default:
         ESP_LOGD(TAG, "GAP event: %d", event);
         break;
@@ -665,10 +745,10 @@ int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_ad
     strncpy(g_bt_state.connected_device_name, device->name, sizeof(g_bt_state.connected_device_name) - 1);
     g_bt_state.connected_device_name[sizeof(g_bt_state.connected_device_name) - 1] = '\0';
     
-    ESP_LOGI(TAG, "Initiating A2DP connection to %s", bt_addr_to_string(target_addr));
+    ESP_LOGI(TAG, "Initiating A2DP source connection to %s", bt_addr_to_string(target_addr));
     
-    // Initiate A2DP connection (this will trigger pairing if needed)
-    esp_err_t ret = esp_a2d_sink_connect(target_addr);
+    // Initiate A2DP source connection (ESP32 streams audio TO speaker)
+    esp_err_t ret = esp_a2d_source_connect(target_addr);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start A2DP connection: %s", esp_err_to_name(ret));
         g_bt_state.state = BT_STATE_IDLE;
