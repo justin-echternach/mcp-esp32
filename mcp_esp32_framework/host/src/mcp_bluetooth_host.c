@@ -373,6 +373,8 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
         char device_name[MAX_DEVICE_NAME_LEN] = {0};
         bool is_audio_device = false;
         int32_t rssi = -128; // Default value if not found
+        uint8_t *eir_data = NULL;
+        int eir_len = 0;
         
         // Check if we have room for more devices
         if (g_bt_state.discovered_device_count >= MAX_DISCOVERED_DEVICES) {
@@ -432,8 +434,38 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
             case ESP_BT_GAP_DEV_PROP_RSSI:
                 rssi = *(int8_t *)(prop->val);
                 break;
+            case ESP_BT_GAP_DEV_PROP_EIR:
+                eir_len = prop->len;
+                eir_data = (uint8_t *)(prop->val);
+                ESP_LOGD(TAG, "EIR data found: length=%d", eir_len);
+                break;
             default:
                 break;
+            }
+        }
+        
+        // Extract name from EIR data if direct name wasn't available (following ESP-IDF example)
+        if (device_name[0] == '\0' && eir_data && eir_len > 0) {
+            uint8_t *rmt_bdname = NULL;
+            uint8_t rmt_bdname_len = 0;
+            
+            // Try complete local name first
+            rmt_bdname = esp_bt_gap_resolve_eir_data(eir_data, ESP_BT_EIR_TYPE_CMPL_LOCAL_NAME, &rmt_bdname_len);
+            if (!rmt_bdname) {
+                // Fall back to short local name
+                rmt_bdname = esp_bt_gap_resolve_eir_data(eir_data, ESP_BT_EIR_TYPE_SHORT_LOCAL_NAME, &rmt_bdname_len);
+            }
+            
+            if (rmt_bdname && rmt_bdname_len > 0) {
+                // Limit name length to our buffer
+                if (rmt_bdname_len >= MAX_DEVICE_NAME_LEN) {
+                    rmt_bdname_len = MAX_DEVICE_NAME_LEN - 1;
+                }
+                memcpy(device_name, rmt_bdname, rmt_bdname_len);
+                device_name[rmt_bdname_len] = '\0';
+                ESP_LOGI(TAG, "Extracted name from EIR: '%s' (len=%d)", device_name, rmt_bdname_len);
+            } else {
+                ESP_LOGD(TAG, "No name found in EIR data");
             }
         }
         
