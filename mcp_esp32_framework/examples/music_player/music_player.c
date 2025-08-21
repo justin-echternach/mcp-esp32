@@ -534,33 +534,59 @@ static mcp_result_t bluetooth_scan_handler(const char* params) {
         log_error("MUSIC", "[WASM] Failed to start scan");
         return mcp_error(-1, "Failed to start Bluetooth scan");
     }
-    
-    // Get results (allocate buffer for JSON response)
-    char scan_buffer[1024] = {0};
-    result = bluetooth_scan_get_results(scan_buffer, sizeof(scan_buffer));
+
+    // Allocate buffer for JSON response (1KB to handle escaping expansion)
+    char* scan_buffer = (char*)malloc(1024);
+    if (!scan_buffer) {
+        log_error("MUSIC", "[WASM] Failed to allocate memory for scan results");
+        return mcp_error(-1, "Failed to allocate memory for scan results");
+    }
+
+    // Get results into first half of buffer
+    result = bluetooth_scan_get_results(scan_buffer, 1024);
     if (result < 0) {
         log_error("MUSIC", "[WASM] Failed to get scan results");
+        free(scan_buffer);
         return mcp_error(-1, "Failed to get scan results");
     }
     
     log_info("MUSIC", "[WASM] Scan complete");
     
-    // Escape JSON for plain text response (replace " with \")
-    char escaped_buffer[1024] = {0};
-    int src = 0, dst = 0;
-    while (scan_buffer[src] && dst < sizeof(escaped_buffer) - 2) {
-        if (scan_buffer[src] == '"') {
-            escaped_buffer[dst++] = '\\';
-            escaped_buffer[dst++] = '"';
-        } else {
-            escaped_buffer[dst++] = scan_buffer[src];
-        }
-        src++;
+    // Escape JSON in-place by shifting characters to make room for backslashes
+    // Work backwards to avoid overwriting unprocessed characters
+    int original_len = strlen(scan_buffer);
+    int quote_count = 0;
+    
+    // Count quotes to know final size
+    for (int i = 0; i < original_len; i++) {
+        if (scan_buffer[i] == '"') quote_count++;
     }
-    escaped_buffer[dst] = '\0';
+    
+    int final_len = original_len + quote_count;
+    if (final_len >= 1024) {
+        log_error("MUSIC", "[WASM] Escaped JSON too large");
+        free(scan_buffer);
+        return mcp_error(-1, "Scan results too large");
+    }
+    
+    // Work backwards to escape in-place
+    scan_buffer[final_len] = '\0';
+    int src = original_len - 1;
+    int dst = final_len - 1;
+    
+    while (src >= 0) {
+        if (scan_buffer[src] == '"') {
+            scan_buffer[dst--] = '"';
+            scan_buffer[dst--] = '\\';
+        } else {
+            scan_buffer[dst--] = scan_buffer[src];
+        }
+        src--;
+    }
     
     // Return the escaped scan results
-    return mcp_success(escaped_buffer);
+    // The buffer will be freed by the MCP framework after response is sent
+    return mcp_success(scan_buffer);
 }
 
 // MCP Tool registration

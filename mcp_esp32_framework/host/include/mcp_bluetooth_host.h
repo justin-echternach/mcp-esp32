@@ -10,6 +10,7 @@
 #include "esp_gap_bt_api.h"
 #include "esp_a2dp_api.h"
 #include "esp_avrc_api.h"
+#include "wasm_export.h"
 
 // Maximum devices we can discover and store
 #define MAX_DISCOVERED_DEVICES 10
@@ -46,19 +47,19 @@ typedef struct {
 } bt_state_t;
 
 // Host function declarations - these will be exposed to WASM
-int32_t bluetooth_init(void);
-int32_t bluetooth_deinit(void);
-int32_t bluetooth_scan_start(int32_t timeout_sec);
-int32_t bluetooth_scan_get_results(char* buffer, int32_t max_len);
-int32_t bluetooth_pair_device(const char* device_name);
-int32_t bluetooth_connect_device(const char* device_address);
-int32_t bluetooth_disconnect(void);
-int32_t bluetooth_is_connected(void);
-int32_t bluetooth_get_connected_device_name(char* buffer, int32_t max_len);
-int32_t bluetooth_get_connected_device_address(char* buffer, int32_t max_len);
-int32_t bluetooth_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
-int32_t bluetooth_play_melody(const char* melody_str, int32_t volume_percent);
-int32_t bluetooth_set_volume(int32_t volume_percent);
+int32_t bluetooth_init(wasm_exec_env_t exec_env);
+int32_t bluetooth_deinit(wasm_exec_env_t exec_env);
+int32_t bluetooth_scan_start(wasm_exec_env_t exec_env, int32_t timeout_sec);
+int32_t bluetooth_scan_get_results(wasm_exec_env_t exec_env, char* buffer, int32_t max_len);
+int32_t bluetooth_pair_device(wasm_exec_env_t exec_env, const char* device_name);
+int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_address);
+int32_t bluetooth_disconnect(wasm_exec_env_t exec_env);
+int32_t bluetooth_is_connected(wasm_exec_env_t exec_env);
+int32_t bluetooth_get_connected_device_name(wasm_exec_env_t exec_env, char* buffer, int32_t max_len);
+int32_t bluetooth_get_connected_device_address(wasm_exec_env_t exec_env, char* buffer, int32_t max_len);
+int32_t bluetooth_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
+int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, int32_t volume_percent);
+int32_t bluetooth_set_volume(wasm_exec_env_t exec_env, int32_t volume_percent);
 
 // Internal helper functions
 void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);

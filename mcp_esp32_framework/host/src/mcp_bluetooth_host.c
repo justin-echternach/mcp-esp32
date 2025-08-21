@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 
+
 static const char* TAG = "BT_HOST";
 
 // Global Bluetooth state
@@ -20,7 +21,7 @@ static EventGroupHandle_t bt_event_group = NULL;
 #define BT_CONNECT_COMPLETE_BIT BIT2
 
 // Initialize Bluetooth stack
-int32_t bluetooth_init(void) {
+int32_t bluetooth_init(wasm_exec_env_t exec_env) {
     ESP_LOGI(TAG, "Initializing Bluetooth stack");
     
     if (g_bt_state.initialized) {
@@ -130,7 +131,7 @@ int32_t bluetooth_init(void) {
 }
 
 // Deinitialize Bluetooth stack
-int32_t bluetooth_deinit(void) {
+int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     ESP_LOGI(TAG, "Deinitializing Bluetooth stack");
     
     if (!g_bt_state.initialized) {
@@ -139,7 +140,7 @@ int32_t bluetooth_deinit(void) {
     
     // Disconnect if connected
     if (g_bt_state.state == BT_STATE_CONNECTED) {
-        bluetooth_disconnect();
+        bluetooth_disconnect(exec_env);
     }
     
     // Deinitialize components in reverse order
@@ -164,7 +165,7 @@ int32_t bluetooth_deinit(void) {
 }
 
 // Start device scanning
-int32_t bluetooth_scan_start(int32_t timeout_sec) {
+int32_t bluetooth_scan_start(wasm_exec_env_t exec_env, int32_t timeout_sec) {
     ESP_LOGI(TAG, "Starting device scan for %d seconds", timeout_sec);
     
     if (!g_bt_state.initialized) {
@@ -216,52 +217,103 @@ int32_t bluetooth_scan_start(int32_t timeout_sec) {
 }
 
 // Get scan results as JSON
-int32_t bluetooth_scan_get_results(char* buffer, int32_t max_len) {
+int32_t bluetooth_scan_get_results(wasm_exec_env_t exec_env, char* buffer, int32_t max_len) {
+    ESP_LOGI(TAG, "bluetooth_scan_get_results: START - buffer=%p, max_len=%d", buffer, max_len);
+    
     if (!buffer || max_len < 1) {
+        ESP_LOGE(TAG, "bluetooth_scan_get_results: Invalid parameters - buffer=%p, max_len=%d", buffer, max_len);
         return -1;
     }
     
     if (!g_bt_state.initialized) {
+        ESP_LOGW(TAG, "bluetooth_scan_get_results: Bluetooth not initialized");
         snprintf(buffer, max_len, "{\"error\":\"Bluetooth not initialized\"}");
         return -1;
     }
     
+    ESP_LOGI(TAG, "bluetooth_scan_get_results: Found %d devices to report", g_bt_state.discovered_device_count);
+    
     // Start JSON array
     int offset = snprintf(buffer, max_len, "{\"devices\":[");
-    if (offset >= max_len) return -2;
+    ESP_LOGI(TAG, "bluetooth_scan_get_results: Initial offset=%d, max_len=%d", offset, max_len);
     
-    for (int i = 0; i < g_bt_state.discovered_device_count && offset < max_len - 100; i++) {
+    if (offset >= max_len - 1) {
+        ESP_LOGE(TAG, "bluetooth_scan_get_results: Buffer too small for header - offset=%d, max_len=%d", offset, max_len);
+        return -2;
+    }
+    
+    for (int i = 0; i < g_bt_state.discovered_device_count && offset < max_len - 200; i++) {
         bt_discovered_device_t* dev = &g_bt_state.discovered_devices[i];
+        
+        ESP_LOGI(TAG, "bluetooth_scan_get_results: Device %d/%d - name='%s', addr=%p", 
+                 i+1, g_bt_state.discovered_device_count, 
+                 dev->name[0] ? dev->name : "Unknown", 
+                 (void*)dev);
+        
+        // Check remaining space
+        if (max_len - offset < 150) {
+            ESP_LOGW(TAG, "bluetooth_scan_get_results: Not enough space for device %d, stopping early", i);
+            break;
+        }
         
         // Add comma for subsequent entries
         if (i > 0) {
-            offset += snprintf(buffer + offset, max_len - offset, ",");
+            int comma_len = snprintf(buffer + offset, max_len - offset, ",");
+            offset += comma_len;
+            ESP_LOGD(TAG, "bluetooth_scan_get_results: Added comma, new offset=%d", offset);
         }
         
+        // Get device address string
+        const char* addr_str = bt_addr_to_string(dev->addr);
+        ESP_LOGI(TAG, "bluetooth_scan_get_results: Device address string: %s", addr_str);
+        
         // Add device entry
-        offset += snprintf(buffer + offset, max_len - offset,
+        int dev_len = snprintf(buffer + offset, max_len - offset,
             "{\"name\": \"%s\", \"address\": \"%s\", \"rssi\": %"PRId32", \"audio_device\": %s}",
             dev->name[0] ? dev->name : "Unknown",
-            bt_addr_to_string(dev->addr),
+            addr_str,
             dev->rssi,
             dev->is_audio_device ? "true" : "false"
         );
+        
+        ESP_LOGI(TAG, "bluetooth_scan_get_results: Device %d JSON length=%d, new offset=%d", i, dev_len, offset + dev_len);
+        
+        if (dev_len >= max_len - offset) {
+            ESP_LOGE(TAG, "bluetooth_scan_get_results: Device %d truncated - dev_len=%d, remaining=%d", 
+                     i, dev_len, max_len - offset);
+            break;
+        }
+        
+        offset += dev_len;
     }
     
+    ESP_LOGI(TAG, "bluetooth_scan_get_results: Closing JSON, offset=%d, remaining=%d", offset, max_len - offset);
+    
     // Close JSON
-    offset += snprintf(buffer + offset, max_len - offset, "],\"count\":%d}", 
-                      g_bt_state.discovered_device_count);
+    int close_len = snprintf(buffer + offset, max_len - offset, "],\"count\":%d}", 
+                            g_bt_state.discovered_device_count);
+    
+    if (close_len >= max_len - offset) {
+        ESP_LOGE(TAG, "bluetooth_scan_get_results: Buffer overflow on close - close_len=%d, remaining=%d", 
+                 close_len, max_len - offset);
+        buffer[max_len - 1] = '\0';  // Ensure null termination
+        return -3;
+    }
+    
+    offset += close_len;
+    ESP_LOGI(TAG, "bluetooth_scan_get_results: SUCCESS - Final JSON length=%d", offset);
+    ESP_LOGD(TAG, "bluetooth_scan_get_results: JSON output: %.100s...", buffer);  // First 100 chars
     
     return 0;
 }
 
 // Check if connected
-int32_t bluetooth_is_connected(void) {
+int32_t bluetooth_is_connected(wasm_exec_env_t exec_env) {
     return g_bt_state.state == BT_STATE_CONNECTED ? 1 : 0;
 }
 
 // Get connected device name
-int32_t bluetooth_get_connected_device_name(char* buffer, int32_t max_len) {
+int32_t bluetooth_get_connected_device_name(wasm_exec_env_t exec_env, char* buffer, int32_t max_len) {
     if (!buffer || max_len < 1) {
         return -1;
     }
@@ -396,37 +448,37 @@ void bt_avrc_callback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *para
 }
 
 // Placeholder implementations for functions we'll implement later
-int32_t bluetooth_pair_device(const char* device_name) {
+int32_t bluetooth_pair_device(wasm_exec_env_t exec_env, const char* device_name) {
     ESP_LOGI(TAG, "Pair device: %s (not yet implemented)", device_name);
     return -1; // Not implemented yet
 }
 
-int32_t bluetooth_connect_device(const char* device_address) {
+int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_address) {
     ESP_LOGI(TAG, "Connect device: %s (not yet implemented)", device_address);
     return -1; // Not implemented yet
 }
 
-int32_t bluetooth_disconnect(void) {
+int32_t bluetooth_disconnect(wasm_exec_env_t exec_env) {
     ESP_LOGI(TAG, "Disconnect (not yet implemented)");
     return -1; // Not implemented yet
 }
 
-int32_t bluetooth_get_connected_device_address(char* buffer, int32_t max_len) {
+int32_t bluetooth_get_connected_device_address(wasm_exec_env_t exec_env, char* buffer, int32_t max_len) {
     ESP_LOGI(TAG, "Get connected device address (not yet implemented)");
     return -1; // Not implemented yet
 }
 
-int32_t bluetooth_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent) {
+int32_t bluetooth_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent) {
     ESP_LOGI(TAG, "Play tone via Bluetooth (not yet implemented)");
     return -1; // Not implemented yet
 }
 
-int32_t bluetooth_play_melody(const char* melody_str, int32_t volume_percent) {
+int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, int32_t volume_percent) {
     ESP_LOGI(TAG, "Play melody via Bluetooth (not yet implemented)");
     return -1; // Not implemented yet  
 }
 
-int32_t bluetooth_set_volume(int32_t volume_percent) {
+int32_t bluetooth_set_volume(wasm_exec_env_t exec_env, int32_t volume_percent) {
     ESP_LOGI(TAG, "Set Bluetooth volume to %d%% (not yet implemented)", volume_percent);
     return -1; // Not implemented yet
 }

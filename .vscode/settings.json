@@ -20,6 +20,7 @@
   "idf.monitorPort": "/dev/ttyUSB1",
   "files.associations": {
     "string.h": "c",
-    "esp_log.h": "c"
+    "esp_log.h": "c",
+    "esp_avrc_api.h": "c"
   }
 }
