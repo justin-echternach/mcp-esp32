@@ -589,6 +589,39 @@ static mcp_result_t bluetooth_scan_handler(const char* params) {
     return mcp_success(scan_buffer);
 }
 
+// Bluetooth connect handler
+static mcp_result_t bluetooth_connect_handler(const char* params) {
+    char device_address[32];
+    char result_json[256];
+    
+    log_info("MUSIC", "[WASM] Connecting to Bluetooth device");
+    
+    // Parse device address parameter
+    if (mcp_parse_string_param(params, "device_address", device_address, sizeof(device_address)) != 0) {
+        log_error("MUSIC", "[WASM] Missing device_address parameter");
+        return mcp_error(-1, "Missing 'device_address' parameter");
+    }
+    
+    log_info("MUSIC", "[WASM] Connecting to device address:");
+    log_info("MUSIC", device_address);
+    
+    // Connect to the device
+    int32_t result = bluetooth_connect_device(device_address);
+    if (result != 0) {
+        log_error("MUSIC", "[WASM] Failed to connect to Bluetooth device");
+        snprintf(result_json, sizeof(result_json), 
+                "Failed to connect to device %s (error code: %d)", device_address, (int)result);
+        return mcp_error(-1, result_json);
+    }
+    
+    log_info("MUSIC", "[WASM] Bluetooth connection successful");
+    
+    snprintf(result_json, sizeof(result_json),
+            "Successfully connected to Bluetooth device %s", device_address);
+    
+    return mcp_success(result_json);
+}
+
 // MCP Tool registration
 static mcp_tool_t music_tools[] = {
     {
@@ -632,6 +665,12 @@ static mcp_tool_t music_tools[] = {
         .description = "Scan for nearby Bluetooth audio devices (speakers/headphones)",
         .input_schema = "{\"type\":\"object\",\"properties\":{\"timeout\":{\"type\":\"integer\",\"description\":\"Scan duration in seconds (1-30)\",\"minimum\":1,\"maximum\":30}}}",
         .handler = bluetooth_scan_handler
+    },
+    {
+        .name = "bluetooth_connect",
+        .description = "Connect to a Bluetooth audio device for wireless music streaming",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"device_address\":{\"type\":\"string\",\"description\":\"MAC address of the device to connect to (e.g. '10:28:74:2D:E4:AC')\"}},\"required\":[\"device_address\"]}",
+        .handler = bluetooth_connect_handler
     }
 };
 

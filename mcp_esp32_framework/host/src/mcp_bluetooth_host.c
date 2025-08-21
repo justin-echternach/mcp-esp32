@@ -511,18 +511,44 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
 // A2DP callback for audio events
 void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
     switch (event) {
-    case ESP_A2D_CONNECTION_STATE_EVT:
+    case ESP_A2D_CONNECTION_STATE_EVT: {
+        const char* addr_str = bt_addr_to_string(param->conn_stat.remote_bda);
+        
         if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-            ESP_LOGI(TAG, "A2DP connected");
+            ESP_LOGI(TAG, "A2DP connected to %s", addr_str);
             g_bt_state.a2dp_connected = true;
+            g_bt_state.state = BT_STATE_CONNECTED;
+            
+            // Signal connection complete
+            xEventGroupSetBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
+            
+        } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTING) {
+            ESP_LOGI(TAG, "A2DP connecting to %s", addr_str);
+            g_bt_state.state = BT_STATE_CONNECTING;
+            
         } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-            ESP_LOGI(TAG, "A2DP disconnected");
+            ESP_LOGI(TAG, "A2DP disconnected from %s", addr_str);
             g_bt_state.a2dp_connected = false;
+            g_bt_state.state = BT_STATE_IDLE;
+            
+            // Clear connected device info
+            memset(g_bt_state.connected_device_addr, 0, ESP_BD_ADDR_LEN);
+            memset(g_bt_state.connected_device_name, 0, sizeof(g_bt_state.connected_device_name));
+            
+            // Signal connection complete (even for disconnect)
+            xEventGroupSetBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
+            
+        } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTING) {
+            ESP_LOGI(TAG, "A2DP disconnecting from %s", addr_str);
         }
         break;
+    }
     case ESP_A2D_AUDIO_STATE_EVT:
         ESP_LOGI(TAG, "A2DP audio state: %s", 
                  param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED ? "Started" : "Stopped");
+        break;
+    case ESP_A2D_AUDIO_CFG_EVT:
+        ESP_LOGI(TAG, "A2DP audio config received - codec ready for streaming");
         break;
     default:
         ESP_LOGD(TAG, "A2DP event: %d", event);
@@ -542,6 +568,44 @@ void bt_avrc_callback(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *para
     }
 }
 
+// Helper function to convert address string to esp_bd_addr_t
+static int str_to_bda(const char* addr_str, esp_bd_addr_t bda) {
+    if (!addr_str || !bda) return -1;
+    
+    // Parse "XX:XX:XX:XX:XX:XX" format
+    int values[6];
+    if (sscanf(addr_str, "%02x:%02x:%02x:%02x:%02x:%02x",
+               &values[0], &values[1], &values[2], 
+               &values[3], &values[4], &values[5]) != 6) {
+        ESP_LOGE(TAG, "Invalid MAC address format: %s", addr_str);
+        return -1;
+    }
+    
+    for (int i = 0; i < 6; i++) {
+        bda[i] = (uint8_t)values[i];
+    }
+    
+    ESP_LOGI(TAG, "Converted address %s to BDA", addr_str);
+    return 0;
+}
+
+// Find device in discovered list by address
+static int32_t find_device_by_address(const char* device_address) {
+    if (!device_address) return -1;
+    
+    esp_bd_addr_t target_addr;
+    if (str_to_bda(device_address, target_addr) != 0) {
+        return -1;
+    }
+    
+    for (int i = 0; i < g_bt_state.discovered_device_count; i++) {
+        if (memcmp(g_bt_state.discovered_devices[i].addr, target_addr, ESP_BD_ADDR_LEN) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
 // Placeholder implementations for functions we'll implement later
 int32_t bluetooth_pair_device(wasm_exec_env_t exec_env, const char* device_name) {
     ESP_LOGI(TAG, "Pair device: %s (not yet implemented)", device_name);
@@ -549,8 +613,87 @@ int32_t bluetooth_pair_device(wasm_exec_env_t exec_env, const char* device_name)
 }
 
 int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_address) {
-    ESP_LOGI(TAG, "Connect device: %s (not yet implemented)", device_address);
-    return -1; // Not implemented yet
+    ESP_LOGI(TAG, "Connecting to device: %s", device_address);
+    
+    if (!g_bt_state.initialized) {
+        ESP_LOGE(TAG, "Bluetooth not initialized");
+        return -1;
+    }
+    
+    if (!device_address) {
+        ESP_LOGE(TAG, "Invalid device address");
+        return -2;
+    }
+    
+    // Check if already connected
+    if (g_bt_state.state == BT_STATE_CONNECTED) {
+        ESP_LOGW(TAG, "Already connected to a device, disconnecting first");
+        bluetooth_disconnect(exec_env);
+        // Wait a bit for disconnection
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+    
+    // Verify device was discovered and is audio-capable
+    int32_t device_index = find_device_by_address(device_address);
+    if (device_index < 0) {
+        ESP_LOGE(TAG, "Device %s not found in scan results. Run bluetooth_scan first.", device_address);
+        return -3;
+    }
+    
+    bt_discovered_device_t* device = &g_bt_state.discovered_devices[device_index];
+    if (!device->is_audio_device) {
+        ESP_LOGE(TAG, "Device %s is not an audio device", device_address);
+        return -4;
+    }
+    
+    ESP_LOGI(TAG, "Connecting to audio device: %s (%s)", 
+             device->name[0] ? device->name : "Unknown", device_address);
+    
+    // Convert address string to esp_bd_addr_t
+    esp_bd_addr_t target_addr;
+    if (str_to_bda(device_address, target_addr) != 0) {
+        ESP_LOGE(TAG, "Failed to parse device address");
+        return -5;
+    }
+    
+    // Clear connection complete bit
+    xEventGroupClearBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
+    
+    // Set connecting state
+    g_bt_state.state = BT_STATE_CONNECTING;
+    memcpy(g_bt_state.connected_device_addr, target_addr, ESP_BD_ADDR_LEN);
+    strncpy(g_bt_state.connected_device_name, device->name, sizeof(g_bt_state.connected_device_name) - 1);
+    g_bt_state.connected_device_name[sizeof(g_bt_state.connected_device_name) - 1] = '\0';
+    
+    ESP_LOGI(TAG, "Initiating A2DP connection to %s", bt_addr_to_string(target_addr));
+    
+    // Initiate A2DP connection (this will trigger pairing if needed)
+    esp_err_t ret = esp_a2d_sink_connect(target_addr);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start A2DP connection: %s", esp_err_to_name(ret));
+        g_bt_state.state = BT_STATE_IDLE;
+        return -6;
+    }
+    
+    ESP_LOGI(TAG, "A2DP connection initiated, waiting for completion...");
+    
+    // Wait for connection to complete (with timeout)
+    EventBits_t bits = xEventGroupWaitBits(bt_event_group, BT_CONNECT_COMPLETE_BIT,
+                                          pdTRUE, pdFALSE, pdMS_TO_TICKS(15000)); // 15 second timeout
+    
+    if (bits & BT_CONNECT_COMPLETE_BIT) {
+        if (g_bt_state.state == BT_STATE_CONNECTED) {
+            ESP_LOGI(TAG, "Successfully connected to %s", device->name);
+            return 0;
+        } else {
+            ESP_LOGE(TAG, "Connection completed but not in connected state");
+            return -7;
+        }
+    } else {
+        ESP_LOGE(TAG, "Connection timeout after 15 seconds");
+        g_bt_state.state = BT_STATE_IDLE;
+        return -8;
+    }
 }
 
 int32_t bluetooth_disconnect(wasm_exec_env_t exec_env) {
