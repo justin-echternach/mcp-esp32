@@ -14,6 +14,9 @@ static const char* TAG = "BT_HOST";
 // Global Bluetooth state
 static bt_state_t g_bt_state = {0};
 
+// Current scan filter type
+static char g_scan_filter[16] = "all"; // Default to no filter
+
 // Event group for synchronizing operations
 static EventGroupHandle_t bt_event_group = NULL;
 #define BT_SCAN_COMPLETE_BIT    BIT0
@@ -168,6 +171,10 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
 int32_t bluetooth_scan_start(wasm_exec_env_t exec_env, int32_t timeout_sec) {
     ESP_LOGI(TAG, "Starting device scan for %d seconds", timeout_sec);
     
+    // For now, hardcode to audio filter - will add parameter later
+    const char* filter_type = "audio";
+    ESP_LOGI(TAG, "Using device filter: %s", filter_type);
+    
     if (!g_bt_state.initialized) {
         ESP_LOGE(TAG, "Bluetooth not initialized");
         return -1;
@@ -187,11 +194,19 @@ int32_t bluetooth_scan_start(wasm_exec_env_t exec_env, int32_t timeout_sec) {
     g_bt_state.discovered_device_count = 0;
     memset(g_bt_state.discovered_devices, 0, sizeof(g_bt_state.discovered_devices));
     
+    // Set scan filter for callback filtering
+    strncpy(g_scan_filter, filter_type, sizeof(g_scan_filter) - 1);
+    g_scan_filter[sizeof(g_scan_filter) - 1] = '\0';
+    
     // Clear scan complete bit
     xEventGroupClearBits(bt_event_group, BT_SCAN_COMPLETE_BIT);
     
     // Set scanning state
     g_bt_state.state = BT_STATE_SCANNING;
+    
+    // Note: ESP-IDF inquiry filter APIs not available in Classic BT mode
+    // Will filter in callback instead for same memory benefit
+    ESP_LOGI(TAG, "Audio filtering will be applied in discovery callback");
     
     // Start discovery
     esp_err_t ret = esp_bt_gap_start_discovery(ESP_BT_INQ_MODE_GENERAL_INQUIRY, timeout_sec, 0);
@@ -364,6 +379,21 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
             break;
         }
         
+        // Early duplicate check to reduce processing overhead
+        bool is_duplicate = false;
+        for (int i = 0; i < g_bt_state.discovered_device_count; i++) {
+            if (memcmp(g_bt_state.discovered_devices[i].addr, param->disc_res.bda, ESP_BD_ADDR_LEN) == 0) {
+                ESP_LOGD(TAG, "Ignoring duplicate device callback: %s", 
+                         bt_addr_to_string(param->disc_res.bda));
+                is_duplicate = true;
+                break;
+            }
+        }
+        
+        if (is_duplicate) {
+            break; // Skip all processing for duplicates
+        }
+        
         // Extract device properties
         for (int i = 0; i < param->disc_res.num_prop; i++) {
             prop = param->disc_res.prop + i;
@@ -374,8 +404,29 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
                 break;
             case ESP_BT_GAP_DEV_PROP_COD: {
                 uint32_t cod = *(uint32_t *)(prop->val);
-                // Check for audio device class (major service class audio bit)
-                is_audio_device = (cod & 0x200000) != 0;  
+                
+                // Use proper ESP-IDF helper functions for CoD analysis
+                uint32_t service_class = esp_bt_gap_get_cod_srvc(cod);
+                uint32_t major_dev = esp_bt_gap_get_cod_major_dev(cod);
+                
+                // Follow ESP-IDF example: validate CoD and check for audio-capable devices
+                // Include PHONE devices (many phones support A2DP) and AV devices
+                bool is_valid_cod = esp_bt_gap_is_valid_cod(cod);
+                bool is_phone_device = (major_dev == ESP_BT_COD_MAJOR_DEV_PHONE);
+                bool is_av_device = (major_dev == ESP_BT_COD_MAJOR_DEV_AV);  
+                bool has_audio_service = (service_class & ESP_BT_COD_SRVC_AUDIO) != 0;
+                
+                // Audio device if: valid CoD AND (phone OR A/V device OR has audio service)
+                is_audio_device = is_valid_cod && (is_phone_device || is_av_device || has_audio_service);
+                
+                // Debug logging for CoD analysis
+                ESP_LOGI(TAG, "CoD: 0x%06X, Svc:0x%03X, Major:%d, Valid:%s, Phone:%s, AV:%s, AudioSvc:%s, Final:%s",
+                         cod, service_class, major_dev,
+                         is_valid_cod ? "Y" : "N",
+                         is_phone_device ? "Y" : "N", 
+                         is_av_device ? "Y" : "N",
+                         has_audio_service ? "Y" : "N",
+                         is_audio_device ? "YES" : "NO");
                 break;
             }
             case ESP_BT_GAP_DEV_PROP_RSSI:
@@ -386,10 +437,22 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
             }
         }
         
-        // Store discovered device
+        // Apply scan filter - skip non-matching devices to save memory
+        if (strcmp(g_scan_filter, "audio") == 0) {
+            if (!is_audio_device) {
+                ESP_LOGD(TAG, "Skipping non-audio device: %s (%s)", 
+                         device_name[0] ? device_name : "Unknown", 
+                         bt_addr_to_string(param->disc_res.bda));
+                break; // Skip this device - not stored, saves memory
+            }
+            ESP_LOGI(TAG, "Audio device detected: %s", device_name[0] ? device_name : "Unknown");
+        }
+        
+        // Store discovered device (only reaches here if passed filter and not duplicate)
         bt_discovered_device_t* dev = &g_bt_state.discovered_devices[g_bt_state.discovered_device_count];
         memcpy(dev->addr, param->disc_res.bda, ESP_BD_ADDR_LEN);
         strncpy(dev->name, device_name, sizeof(dev->name) - 1);
+        dev->name[sizeof(dev->name) - 1] = '\0';
         dev->rssi = rssi;
         dev->is_audio_device = is_audio_device;
         

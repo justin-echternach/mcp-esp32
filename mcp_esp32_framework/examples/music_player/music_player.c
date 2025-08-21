@@ -520,8 +520,8 @@ static mcp_result_t bluetooth_init_handler(const char* params) {
 static mcp_result_t bluetooth_scan_handler(const char* params) {
     log_info("MUSIC", "[WASM] Starting Bluetooth device scan");
     
-    // Default timeout 10 seconds
-    int32_t timeout = 10;
+    // Reduce timeout to 5 seconds to reduce BT controller pressure
+    int32_t timeout = 5;
     
     // Parse timeout from params if provided (simple parsing for now)
     // TODO: Use proper JSON parsing if needed
