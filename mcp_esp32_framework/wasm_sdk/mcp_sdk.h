@@ -122,6 +122,8 @@ extern int32_t bluetooth_get_connected_device_address(char* buffer, int32_t max_
 extern int32_t bluetooth_play_tone(int32_t frequency_hz, int32_t duration_ms, int32_t volume_percent);
 extern int32_t bluetooth_play_melody(const char* melody_str, int32_t volume_percent);
 extern int32_t bluetooth_set_volume(int32_t volume_percent);
+extern int32_t bluetooth_start_a2dp_streaming(void);
+extern int32_t bluetooth_stop_a2dp_streaming(void);
 
 // SSE Events
 extern int32_t sse_send_event(const char* event_type, const char* data);

@@ -157,6 +157,8 @@ static bool is_playing = false;
 static float get_note_frequency(const char* note);
 static int parse_note_duration(const char* note_with_duration, char* note_out, int* duration_out);
 static mcp_result_t play_single_note(const char* note, int duration, int volume);
+static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* result_json, size_t result_size);
+static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, char* result_json, size_t result_size);
 
 // Tool: play_note - Play a single note with optional duration and volume
 mcp_result_t play_note_handler(const char* params) {
@@ -219,6 +221,7 @@ mcp_result_t play_note_handler(const char* params) {
 mcp_result_t play_melody_handler(const char* params) {
     char melody[MAX_MELODY_LENGTH];
     int volume = current_volume;
+    char output[16] = "local";  // Default to local I2S output
     char result_json[256];
     
     log_info("MUSIC", "play_melody_handler called");
@@ -236,12 +239,34 @@ mcp_result_t play_melody_handler(const char* params) {
     // Optional volume
     mcp_parse_int_param(params, "volume", &volume);
     
+    // Optional output destination
+    mcp_parse_string_param(params, "output", output, sizeof(output));
+    
     if (volume < 0 || volume > 100) {
         return mcp_error(-3, "Volume must be between 0 and 100");
     }
     
-    log_info("MUSIC", "Converting note names to frequencies");
+    log_info("MUSIC", "Output destination:");
+    log_info("MUSIC", output);
     
+    // Route to appropriate output system
+    if (strcmp(output, "local") == 0) {
+        log_info("MUSIC", "Using local I2S output");
+        return play_melody_local_i2s(melody, volume, result_json, sizeof(result_json));
+    } else if (strcmp(output, "bluetooth") == 0) {
+        log_info("MUSIC", "Using Bluetooth A2DP output");
+        return play_melody_bluetooth_a2dp(melody, volume, result_json, sizeof(result_json));
+    } else if (strcmp(output, "both") == 0) {
+        log_info("MUSIC", "Using both local and Bluetooth output");
+        // For now, just use local - "both" can be implemented later
+        return play_melody_local_i2s(melody, volume, result_json, sizeof(result_json));
+    } else {
+        return mcp_error(-4, "Invalid output parameter. Use 'local', 'bluetooth', or 'both'");
+    }
+}
+
+// Play melody via local I2S (existing implementation)
+static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* result_json, size_t result_size) {
     // Convert note names to frequencies for the new continuous playback
     // Allocate dynamic buffer with 3x expansion factor for frequency conversion
     size_t melody_len = strlen(melody);
@@ -349,8 +374,26 @@ mcp_result_t play_melody_handler(const char* params) {
     
     is_playing = true;
     
-    snprintf(result_json, sizeof(result_json),
+    snprintf(result_json, result_size,
         "Playing melody with crossfading at volume %d%% via continuous I2S audio",
+        volume);
+    
+    return mcp_success(result_json);
+}
+
+// Play melody via Bluetooth A2DP (new implementation)
+static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, char* result_json, size_t result_size) {
+    log_info("MUSIC", "Starting Bluetooth A2DP melody playback");
+    
+    // Call the host function to play melody via Bluetooth A2DP
+    if (bluetooth_play_melody(melody, volume) != 0) {
+        return mcp_error(-10, "Failed to start Bluetooth A2DP melody playback");
+    }
+    
+    is_playing = true;
+    
+    snprintf(result_json, result_size,
+        "Playing melody at volume %d%% via Bluetooth A2DP streaming",
         volume);
     
     return mcp_success(result_json);
@@ -632,8 +675,8 @@ static mcp_tool_t music_tools[] = {
     },
     {
         .name = "play_melody", 
-        .description = "Play a sequence of notes as a melody",
-        .input_schema = "{\"type\":\"object\",\"properties\":{\"melody\":{\"type\":\"string\",\"description\":\"Comma-separated musical notes with optional durations (e.g. 'C4:500,D4:300,E4:1000' or 'C4,D4,E4'). Format: NOTE:DURATION_MS where duration is optional (defaults to 500ms)\"},\"volume\":{\"type\":\"integer\",\"description\":\"Volume level (0-100)\",\"minimum\":0,\"maximum\":100}},\"required\":[\"melody\"]}",
+        .description = "Play a sequence of notes as a melody via local I2S or Bluetooth A2DP",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"melody\":{\"type\":\"string\",\"description\":\"Comma-separated notes (e.g. 'C4:500,D4,E4')\"},\"volume\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"output\":{\"type\":\"string\",\"enum\":[\"local\",\"bluetooth\",\"both\"],\"default\":\"local\",\"description\":\"Output: local I2S or bluetooth A2DP\"}},\"required\":[\"melody\"]}",
         .handler = play_melody_handler
     },
     {

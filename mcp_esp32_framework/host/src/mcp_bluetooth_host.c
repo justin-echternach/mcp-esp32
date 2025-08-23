@@ -1,12 +1,16 @@
 #include "mcp_bluetooth_host.h"
+#include "mcp_host_functions.h"
+#include "mcp_memory.h"
 #include "esp_log.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "esp_timer.h"
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <math.h>
 
 
 static const char* TAG = "BT_HOST";
@@ -22,6 +26,42 @@ static EventGroupHandle_t bt_event_group = NULL;
 #define BT_SCAN_COMPLETE_BIT    BIT0
 #define BT_PAIR_COMPLETE_BIT    BIT1
 #define BT_CONNECT_COMPLETE_BIT BIT2
+
+// A2DP streaming state and PSRAM buffers
+static int16_t* a2dp_stream_buffer = NULL;
+static size_t a2dp_buffer_size = 0;
+static bool a2dp_streaming_active = false;
+static float a2dp_stream_time = 0.0f;
+
+// A2DP melody state tracking
+typedef struct {
+    float frequency;
+    int duration_ms;
+} a2dp_note_t;
+
+static a2dp_note_t* a2dp_melody_notes = NULL;
+static int a2dp_melody_count = 0;
+static int a2dp_current_note_index = 0;
+static int64_t a2dp_note_start_time_us = 0;
+static int a2dp_melody_volume = 50;
+static bool a2dp_melody_playing = false;
+
+// A2DP streaming configuration
+#define A2DP_SAMPLE_RATE 44100
+#define A2DP_BUFFER_FRAMES 1024
+#define A2DP_BUFFER_SIZE (A2DP_BUFFER_FRAMES * 2 * sizeof(int16_t)) // Stereo
+
+// Forward declarations for A2DP streaming functions
+static int32_t a2dp_init_streaming_buffer(void);
+static void a2dp_cleanup_streaming_buffer(void);
+static int32_t a2dp_audio_callback(uint8_t* data, int32_t len);
+
+// Forward declarations for A2DP melody functions
+static float a2dp_note_to_frequency(const char* note);
+static int32_t a2dp_parse_melody(const char* melody_str);
+static void a2dp_cleanup_melody(void);
+static void a2dp_start_melody(void);
+static void a2dp_stop_melody(void);
 
 // Initialize Bluetooth stack
 int32_t bluetooth_init(wasm_exec_env_t exec_env) {
@@ -170,6 +210,10 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     if (g_bt_state.state == BT_STATE_CONNECTED) {
         bluetooth_disconnect(exec_env);
     }
+    
+    // Stop and cleanup A2DP streaming
+    a2dp_streaming_active = false;
+    a2dp_cleanup_streaming_buffer();
     
     // Deinitialize components in reverse order
     esp_avrc_ct_deinit();
@@ -447,13 +491,13 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
                 is_audio_device = is_valid_cod && (is_phone_device || is_av_device || has_audio_service);
                 
                 // Debug logging for CoD analysis
-                ESP_LOGI(TAG, "CoD: 0x%06X, Svc:0x%03X, Major:%d, Valid:%s, Phone:%s, AV:%s, AudioSvc:%s, Final:%s",
-                         cod, service_class, major_dev,
-                         is_valid_cod ? "Y" : "N",
-                         is_phone_device ? "Y" : "N", 
-                         is_av_device ? "Y" : "N",
-                         has_audio_service ? "Y" : "N",
-                         is_audio_device ? "YES" : "NO");
+                // ESP_LOGI(TAG, "CoD: 0x%06X, Svc:0x%03X, Major:%d, Valid:%s, Phone:%s, AV:%s, AudioSvc:%s, Final:%s",
+                //          cod, service_class, major_dev,
+                //          is_valid_cod ? "Y" : "N",
+                //          is_phone_device ? "Y" : "N", 
+                //          is_av_device ? "Y" : "N",
+                //          has_audio_service ? "Y" : "N",
+                //          is_audio_device ? "YES" : "NO");
                 break;
             }
             case ESP_BT_GAP_DEV_PROP_RSSI:
@@ -686,6 +730,315 @@ static int32_t find_device_by_address(const char* device_address) {
     return -1;
 }
 
+// A2DP streaming buffer management using PSRAM
+static int32_t a2dp_init_streaming_buffer(void) {
+    if (a2dp_stream_buffer != NULL) {
+        return 0; // Already allocated
+    }
+    
+    ESP_LOGI(TAG, "Allocating A2DP streaming buffer in PSRAM (%zu bytes)", A2DP_BUFFER_SIZE);
+    a2dp_stream_buffer = (int16_t*)mcp_malloc(A2DP_BUFFER_SIZE);
+    if (!a2dp_stream_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate A2DP streaming buffer in PSRAM");
+        return -1;
+    }
+    
+    a2dp_buffer_size = A2DP_BUFFER_SIZE;
+    a2dp_stream_time = 0.0f;
+    
+    ESP_LOGI(TAG, "A2DP streaming buffer allocated successfully in PSRAM");
+    return 0;
+}
+
+static void a2dp_cleanup_streaming_buffer(void) {
+    if (a2dp_stream_buffer) {
+        ESP_LOGI(TAG, "Freeing A2DP streaming buffer from PSRAM");
+        mcp_free(a2dp_stream_buffer);
+        a2dp_stream_buffer = NULL;
+        a2dp_buffer_size = 0;
+    }
+    a2dp_streaming_active = false;
+    a2dp_stream_time = 0.0f;
+}
+
+// A2DP audio data callback - generates audio samples for streaming
+static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
+    static int callback_count = 0;
+    callback_count++;
+    
+    // Log every 100th callback to avoid log spam, plus first few
+    if (callback_count <= 5 || callback_count % 100 == 0) {
+        ESP_LOGI(TAG, "A2DP callback #%d: data=%p, len=%d", callback_count, data, len);
+    }
+    
+    // Add NULL pointer checks
+    if (!data) {
+        ESP_LOGE(TAG, "A2DP callback: NULL data pointer!");
+        return 0;
+    }
+    
+    if (len <= 0) {
+        ESP_LOGW(TAG, "A2DP callback: Invalid length %d", len);
+        return 0;
+    }
+    
+    if (!a2dp_stream_buffer || !a2dp_streaming_active) {
+        // No audio to stream, send silence
+        if (callback_count <= 3) {
+            ESP_LOGI(TAG, "A2DP callback: Sending silence (buffer=%p, active=%d)", 
+                     a2dp_stream_buffer, a2dp_streaming_active);
+        }
+        memset(data, 0, len);
+        return len;
+    }
+    
+    int16_t* samples = (int16_t*)data;
+    int32_t sample_count = len / sizeof(int16_t);
+    
+    if (callback_count <= 3) {
+        ESP_LOGI(TAG, "A2DP callback: samples=%p, sample_count=%d", samples, sample_count);
+    }
+    
+    // Check if we're playing a melody
+    if (!a2dp_melody_playing || !a2dp_melody_notes || a2dp_melody_count == 0) {
+        // No melody playing, send silence
+        if (callback_count <= 3) {
+            ESP_LOGI(TAG, "A2DP callback: No melody playing (playing=%d, notes=%p, count=%d)", 
+                     a2dp_melody_playing, a2dp_melody_notes, a2dp_melody_count);
+        }
+        memset(data, 0, len);
+        return len;
+    }
+    
+    // Get current time and check if we need to advance to next note
+    int64_t current_time_us = esp_timer_get_time();
+    int64_t elapsed_ms = (current_time_us - a2dp_note_start_time_us) / 1000;
+    
+    if (callback_count <= 3) {
+        ESP_LOGI(TAG, "A2DP callback: current_note_index=%d, elapsed_ms=%lld", 
+                 a2dp_current_note_index, elapsed_ms);
+    }
+    
+    // Check if current note duration has elapsed
+    if (a2dp_current_note_index < a2dp_melody_count) {
+        a2dp_note_t* current_note = &a2dp_melody_notes[a2dp_current_note_index];
+        
+        if (elapsed_ms >= current_note->duration_ms) {
+            // Move to next note
+            a2dp_current_note_index++;
+            a2dp_note_start_time_us = current_time_us;
+            
+            ESP_LOGI(TAG, "A2DP: Advanced to note %d (frequency=%.1fHz)", 
+                     a2dp_current_note_index, 
+                     a2dp_current_note_index < a2dp_melody_count ? 
+                     a2dp_melody_notes[a2dp_current_note_index].frequency : 0.0f);
+            
+            if (a2dp_current_note_index >= a2dp_melody_count) {
+                // Melody finished, stop playback
+                a2dp_melody_playing = false;
+                memset(data, 0, len);
+                ESP_LOGI(TAG, "Melody playback completed");
+                return len;
+            }
+        }
+    }
+    
+    // Generate audio for current note
+    if (a2dp_current_note_index < a2dp_melody_count) {
+        float frequency = a2dp_melody_notes[a2dp_current_note_index].frequency;
+        float volume_scale = (float)a2dp_melody_volume / 100.0f;
+        
+        if (callback_count <= 3) {
+            ESP_LOGI(TAG, "A2DP callback: Generating audio - freq=%.1fHz, vol=%.2f", 
+                     frequency, volume_scale);
+        }
+        
+        // Add bounds check for sample array access
+        if (sample_count > 2000) {  // Sanity check - typical is 128-512 samples
+            ESP_LOGE(TAG, "A2DP callback: Suspiciously large sample_count=%d", sample_count);
+            memset(data, 0, len);
+            return len;
+        }
+        
+        for (int32_t i = 0; i < sample_count; i += 2) {
+            // Safety check before array access
+            if (i + 1 >= sample_count) {
+                ESP_LOGE(TAG, "A2DP callback: Array bounds error i=%d, sample_count=%d", i, sample_count);
+                break;
+            }
+            
+            // Generate stereo sine wave for current note
+            float angle = a2dp_stream_time * frequency * 2.0f * M_PI;
+            int16_t sample = (int16_t)(16000.0f * volume_scale * sinf(angle));
+            
+            samples[i] = sample;     // Left channel
+            samples[i + 1] = sample; // Right channel
+            
+            a2dp_stream_time += 1.0f / A2DP_SAMPLE_RATE;
+        }
+        
+        if (callback_count <= 3) {
+            ESP_LOGI(TAG, "A2DP callback: Generated %d samples successfully", sample_count);
+        }
+    } else {
+        // No more notes, send silence
+        if (callback_count <= 3) {
+            ESP_LOGI(TAG, "A2DP callback: No current note, sending silence");
+        }
+        memset(data, 0, len);
+    }
+    
+    return len;
+}
+
+// A2DP Melody Helper Functions
+
+// Convert note name to frequency (simplified version)
+static float a2dp_note_to_frequency(const char* note) {
+    // Simplified note lookup table - just the basics for now
+    if (strncmp(note, "C4", 2) == 0) return 261.63f;
+    if (strncmp(note, "D4", 2) == 0) return 293.66f;
+    if (strncmp(note, "E4", 2) == 0) return 329.63f;
+    if (strncmp(note, "F4", 2) == 0) return 349.23f;
+    if (strncmp(note, "G4", 2) == 0) return 392.00f;
+    if (strncmp(note, "A4", 2) == 0) return 440.00f;
+    if (strncmp(note, "B4", 2) == 0) return 493.88f;
+    
+    // Default to A4 if note not recognized
+    ESP_LOGW(TAG, "Unknown note: %s, using A4 (440Hz)", note);
+    return 440.0f;
+}
+
+// Parse melody string into note array
+static int32_t a2dp_parse_melody(const char* melody_str) {
+    if (!melody_str) return -1;
+    
+    // Clean up any existing melody
+    a2dp_cleanup_melody();
+    
+    // Count notes first
+    int note_count = 1; // At least one note
+    for (const char* p = melody_str; *p; p++) {
+        if (*p == ',') note_count++;
+    }
+    
+    // Allocate memory for notes
+    a2dp_melody_notes = (a2dp_note_t*)mcp_malloc(note_count * sizeof(a2dp_note_t));
+    if (!a2dp_melody_notes) {
+        ESP_LOGE(TAG, "Failed to allocate memory for melody notes");
+        return -1;
+    }
+    
+    // Parse notes
+    char melody_copy[512];
+    strncpy(melody_copy, melody_str, sizeof(melody_copy) - 1);
+    melody_copy[sizeof(melody_copy) - 1] = '\0';
+    
+    char* token = strtok(melody_copy, ",");
+    int parsed_count = 0;
+    
+    while (token && parsed_count < note_count) {
+        // Parse note:duration format (e.g., "C4:500")
+        char* colon = strchr(token, ':');
+        int duration = 500; // Default duration
+        
+        if (colon) {
+            *colon = '\0';
+            duration = atoi(colon + 1);
+            if (duration <= 0) duration = 500;
+        }
+        
+        float frequency = a2dp_note_to_frequency(token);
+        
+        a2dp_melody_notes[parsed_count].frequency = frequency;
+        a2dp_melody_notes[parsed_count].duration_ms = duration;
+        
+        ESP_LOGD(TAG, "Parsed note %d: %s -> %.2fHz, %dms", parsed_count, token, frequency, duration);
+        
+        parsed_count++;
+        token = strtok(NULL, ",");
+    }
+    
+    a2dp_melody_count = parsed_count;
+    ESP_LOGI(TAG, "Parsed %d notes from melody", a2dp_melody_count);
+    
+    return 0;
+}
+
+// Clean up melody resources
+static void a2dp_cleanup_melody(void) {
+    if (a2dp_melody_notes) {
+        mcp_free(a2dp_melody_notes);
+        a2dp_melody_notes = NULL;
+    }
+    a2dp_melody_count = 0;
+    a2dp_current_note_index = 0;
+    a2dp_melody_playing = false;
+}
+
+// Start melody playback
+static void a2dp_start_melody(void) {
+    if (a2dp_melody_count > 0) {
+        a2dp_current_note_index = 0;
+        a2dp_note_start_time_us = esp_timer_get_time();
+        a2dp_melody_playing = true;
+        ESP_LOGI(TAG, "Started melody with %d notes", a2dp_melody_count);
+    }
+}
+
+// Stop melody playback
+static void a2dp_stop_melody(void) {
+    a2dp_melody_playing = false;
+    ESP_LOGI(TAG, "Stopped melody playback");
+}
+
+// Start A2DP streaming
+int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
+    ESP_LOGI(TAG, "Starting A2DP streaming");
+    
+    if (!g_bt_state.initialized || !g_bt_state.a2dp_connected) {
+        ESP_LOGE(TAG, "Bluetooth not connected for A2DP streaming");
+        return -1;
+    }
+    
+    // Initialize PSRAM buffer
+    if (a2dp_init_streaming_buffer() != 0) {
+        return -2;
+    }
+    
+    // Register A2DP source data callback
+    esp_err_t ret = esp_a2d_source_register_data_callback(a2dp_audio_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register A2DP data callback: %s", esp_err_to_name(ret));
+        return -3;
+    }
+    
+    // Start media transmission - this triggers the audio callback
+    ret = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start A2DP media transmission: %s", esp_err_to_name(ret));
+        return -4;
+    }
+    
+    a2dp_streaming_active = true;
+    ESP_LOGI(TAG, "A2DP streaming started successfully");
+    return 0;
+}
+
+// Stop A2DP streaming
+int32_t bluetooth_stop_a2dp_streaming(wasm_exec_env_t exec_env) {
+    ESP_LOGI(TAG, "Stopping A2DP streaming");
+    
+    a2dp_streaming_active = false;
+    
+    // Unregister callback
+    esp_a2d_source_register_data_callback(NULL);
+    
+    // Keep buffer allocated for potential reuse
+    ESP_LOGI(TAG, "A2DP streaming stopped");
+    return 0;
+}
+
 // Placeholder implementations for functions we'll implement later
 int32_t bluetooth_pair_device(wasm_exec_env_t exec_env, const char* device_name) {
     ESP_LOGI(TAG, "Pair device: %s (not yet implemented)", device_name);
@@ -792,8 +1145,41 @@ int32_t bluetooth_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int3
 }
 
 int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, int32_t volume_percent) {
-    ESP_LOGI(TAG, "Play melody via Bluetooth (not yet implemented)");
-    return -1; // Not implemented yet  
+    ESP_LOGI(TAG, "Starting Bluetooth A2DP melody playback");
+    
+    if (!g_bt_state.a2dp_connected) {
+        ESP_LOGE(TAG, "A2DP not connected - cannot play melody");
+        return -1;
+    }
+    
+    // Parse the melody string into notes
+    if (a2dp_parse_melody(melody_str) != 0) {
+        ESP_LOGE(TAG, "Failed to parse melody string");
+        return -2;
+    }
+    
+    // Set volume (clamp to valid range)
+    a2dp_melody_volume = (volume_percent < 0) ? 0 : (volume_percent > 100) ? 100 : volume_percent;
+    
+    // Initialize A2DP streaming buffer if needed
+    if (a2dp_init_streaming_buffer() != 0) {
+        ESP_LOGE(TAG, "Failed to initialize A2DP streaming buffer");
+        a2dp_cleanup_melody();
+        return -3;
+    }
+    
+    // Start melody playback
+    a2dp_start_melody();
+    
+    // Start A2DP streaming (this will trigger the audio callback)
+    if (bluetooth_start_a2dp_streaming(exec_env) != 0) {
+        ESP_LOGE(TAG, "Failed to start A2DP streaming");
+        a2dp_stop_melody();
+        return -4;
+    }
+    
+    ESP_LOGI(TAG, "A2DP melody playback started successfully");
+    return 0;
 }
 
 int32_t bluetooth_set_volume(wasm_exec_env_t exec_env, int32_t volume_percent) {
