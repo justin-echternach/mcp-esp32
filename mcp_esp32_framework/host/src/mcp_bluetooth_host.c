@@ -51,6 +51,14 @@ static bool a2dp_melody_playing = false;
 #define A2DP_BUFFER_FRAMES 1024
 #define A2DP_BUFFER_SIZE (A2DP_BUFFER_FRAMES * 2 * sizeof(int16_t)) // Stereo
 
+// Sine lookup table for efficient audio generation
+#define SINE_TABLE_SIZE 1024
+#define SINE_TABLE_SHIFT 10  // log2(SINE_TABLE_SIZE)
+static int16_t* sine_lookup_table = NULL;
+
+// Audio generation state for phase continuity
+static float a2dp_phase = 0.0f;  // Current phase (0.0 to 1.0)
+
 // Forward declarations for A2DP streaming functions
 static int32_t a2dp_init_streaming_buffer(void);
 static void a2dp_cleanup_streaming_buffer(void);
@@ -62,6 +70,11 @@ static int32_t a2dp_parse_melody(const char* melody_str);
 static void a2dp_cleanup_melody(void);
 static void a2dp_start_melody(void);
 static void a2dp_stop_melody(void);
+
+// Forward declarations for sine lookup table
+static int32_t a2dp_init_sine_table(void);
+static void a2dp_cleanup_sine_table(void);
+static inline int16_t a2dp_sine_lookup(float phase);
 
 // Initialize Bluetooth stack
 int32_t bluetooth_init(wasm_exec_env_t exec_env) {
@@ -214,6 +227,8 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     // Stop and cleanup A2DP streaming
     a2dp_streaming_active = false;
     a2dp_cleanup_streaming_buffer();
+    a2dp_cleanup_sine_table();
+    a2dp_cleanup_melody();
     
     // Deinitialize components in reverse order
     esp_avrc_ct_deinit();
@@ -643,6 +658,30 @@ void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             g_bt_state.a2dp_connected = true;
             g_bt_state.state = BT_STATE_CONNECTED;
             
+            // Store connected device info (important for auto-connections during scan)
+            memcpy(g_bt_state.connected_device_addr, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
+            
+            // Try to find device name from discovered devices
+            bool found_name = false;
+            for (int i = 0; i < g_bt_state.discovered_device_count; i++) {
+                if (memcmp(g_bt_state.discovered_devices[i].addr, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN) == 0) {
+                    strncpy(g_bt_state.connected_device_name, 
+                           g_bt_state.discovered_devices[i].name, 
+                           sizeof(g_bt_state.connected_device_name) - 1);
+                    g_bt_state.connected_device_name[sizeof(g_bt_state.connected_device_name) - 1] = '\0';
+                    found_name = true;
+                    ESP_LOGI(TAG, "Auto-connection detected during scan: %s", g_bt_state.connected_device_name);
+                    break;
+                }
+            }
+            
+            if (!found_name) {
+                // Fallback if device wasn't in discovered list
+                snprintf(g_bt_state.connected_device_name, sizeof(g_bt_state.connected_device_name), 
+                        "Device_%s", addr_str);
+                ESP_LOGI(TAG, "Auto-connection detected to unknown device: %s", addr_str);
+            }
+            
             // Signal connection complete
             xEventGroupSetBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
             
@@ -828,16 +867,27 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             a2dp_current_note_index++;
             a2dp_note_start_time_us = current_time_us;
             
-            ESP_LOGI(TAG, "A2DP: Advanced to note %d (frequency=%.1fHz)", 
-                     a2dp_current_note_index, 
-                     a2dp_current_note_index < a2dp_melody_count ? 
-                     a2dp_melody_notes[a2dp_current_note_index].frequency : 0.0f);
+            if (a2dp_current_note_index < a2dp_melody_count) {
+                ESP_LOGI(TAG, "A2DP: Advanced to note %d (frequency=%.1fHz)", 
+                         a2dp_current_note_index, 
+                         a2dp_melody_notes[a2dp_current_note_index].frequency);
+            } else {
+                ESP_LOGI(TAG, "A2DP: Advanced past final note (%d >= %d)", 
+                         a2dp_current_note_index, a2dp_melody_count);
+            }
             
             if (a2dp_current_note_index >= a2dp_melody_count) {
                 // Melody finished, stop playback
                 a2dp_melody_playing = false;
                 memset(data, 0, len);
-                ESP_LOGI(TAG, "Melody playback completed");
+                ESP_LOGI(TAG, "Melody playback completed - stopping A2DP streaming");
+                
+                // Stop A2DP streaming gracefully
+                esp_err_t err = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_STOP);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to stop A2DP media: %s", esp_err_to_name(err));
+                }
+                
                 return len;
             }
         }
@@ -860,6 +910,9 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             return len;
         }
         
+        // Calculate phase increment for this frequency
+        float phase_increment = frequency / (float)A2DP_SAMPLE_RATE;
+        
         for (int32_t i = 0; i < sample_count; i += 2) {
             // Safety check before array access
             if (i + 1 >= sample_count) {
@@ -867,14 +920,18 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
                 break;
             }
             
-            // Generate stereo sine wave for current note
-            float angle = a2dp_stream_time * frequency * 2.0f * M_PI;
-            int16_t sample = (int16_t)(16000.0f * volume_scale * sinf(angle));
+            // Generate stereo sine wave using lookup table
+            int16_t raw_sample = a2dp_sine_lookup(a2dp_phase);
+            int16_t sample = (int16_t)((float)raw_sample * volume_scale * 0.5f); // Scale down to prevent clipping
             
             samples[i] = sample;     // Left channel
             samples[i + 1] = sample; // Right channel
             
-            a2dp_stream_time += 1.0f / A2DP_SAMPLE_RATE;
+            // Advance phase with wrap-around for continuity
+            a2dp_phase += phase_increment;
+            if (a2dp_phase >= 1.0f) {
+                a2dp_phase -= 1.0f;
+            }
         }
         
         if (callback_count <= 3) {
@@ -889,6 +946,61 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
     }
     
     return len;
+}
+
+// Sine Lookup Table Functions
+
+// Initialize sine lookup table in PSRAM for efficient audio generation
+static int32_t a2dp_init_sine_table(void) {
+    if (sine_lookup_table != NULL) {
+        return 0; // Already initialized
+    }
+    
+    ESP_LOGI(TAG, "Initializing sine lookup table (%d samples)", SINE_TABLE_SIZE);
+    sine_lookup_table = (int16_t*)mcp_malloc(SINE_TABLE_SIZE * sizeof(int16_t));
+    if (!sine_lookup_table) {
+        ESP_LOGE(TAG, "Failed to allocate sine lookup table in PSRAM");
+        return -1;
+    }
+    
+    // Pre-calculate sine values (16-bit signed, full amplitude range)
+    for (int i = 0; i < SINE_TABLE_SIZE; i++) {
+        float angle = 2.0f * M_PI * (float)i / (float)SINE_TABLE_SIZE;
+        sine_lookup_table[i] = (int16_t)(32767.0f * sinf(angle));
+    }
+    
+    ESP_LOGI(TAG, "Sine lookup table initialized successfully");
+    return 0;
+}
+
+// Clean up sine lookup table
+static void a2dp_cleanup_sine_table(void) {
+    if (sine_lookup_table) {
+        ESP_LOGI(TAG, "Freeing sine lookup table");
+        mcp_free(sine_lookup_table);
+        sine_lookup_table = NULL;
+    }
+}
+
+// Fast sine lookup with linear interpolation for smooth audio
+static inline int16_t a2dp_sine_lookup(float phase) {
+    if (!sine_lookup_table) return 0;
+    
+    // Wrap phase to 0.0-1.0 range
+    phase = phase - floorf(phase);
+    if (phase < 0.0f) phase += 1.0f;
+    
+    // Convert to table index with fractional part
+    float table_pos = phase * (float)SINE_TABLE_SIZE;
+    int index = (int)table_pos;
+    float frac = table_pos - (float)index;
+    
+    // Get two adjacent samples
+    int16_t sample1 = sine_lookup_table[index & (SINE_TABLE_SIZE - 1)];
+    int16_t sample2 = sine_lookup_table[(index + 1) & (SINE_TABLE_SIZE - 1)];
+    
+    // Linear interpolation for smoother audio
+    return (int16_t)(sample1 + frac * (sample2 - sample1));
 }
 
 // A2DP Melody Helper Functions
@@ -1012,18 +1124,26 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
         return -2;
     }
     
+    // Initialize sine lookup table
+    if (a2dp_init_sine_table() != 0) {
+        return -3;
+    }
+    
+    // Reset phase for clean start
+    a2dp_phase = 0.0f;
+    
     // Register A2DP source data callback
     esp_err_t ret = esp_a2d_source_register_data_callback(a2dp_audio_callback);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register A2DP data callback: %s", esp_err_to_name(ret));
-        return -3;
+        return -4;
     }
     
     // Start media transmission - this triggers the audio callback
     ret = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start A2DP media transmission: %s", esp_err_to_name(ret));
-        return -4;
+        return -5;
     }
     
     a2dp_streaming_active = true;
@@ -1064,9 +1184,21 @@ int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_ad
         return -2;
     }
     
-    // Check if already connected
+    // Convert address string to esp_bd_addr_t first
+    esp_bd_addr_t target_addr;
+    if (str_to_bda(device_address, target_addr) != 0) {
+        ESP_LOGE(TAG, "Failed to parse device address");
+        return -5;
+    }
+    
+    // Check if already connected to this specific device
     if (g_bt_state.state == BT_STATE_CONNECTED) {
-        ESP_LOGW(TAG, "Already connected to a device, disconnecting first");
+        if (memcmp(g_bt_state.connected_device_addr, target_addr, ESP_BD_ADDR_LEN) == 0) {
+            ESP_LOGI(TAG, "Already connected to requested device %s - returning success", device_address);
+            return 0; // Success - already connected to the requested device
+        }
+        
+        ESP_LOGW(TAG, "Already connected to a different device, disconnecting first");
         bluetooth_disconnect(exec_env);
         // Wait a bit for disconnection
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1087,13 +1219,6 @@ int32_t bluetooth_connect_device(wasm_exec_env_t exec_env, const char* device_ad
     
     ESP_LOGI(TAG, "Connecting to audio device: %s (%s)", 
              device->name[0] ? device->name : "Unknown", device_address);
-    
-    // Convert address string to esp_bd_addr_t
-    esp_bd_addr_t target_addr;
-    if (str_to_bda(device_address, target_addr) != 0) {
-        ESP_LOGE(TAG, "Failed to parse device address");
-        return -5;
-    }
     
     // Clear connection complete bit
     xEventGroupClearBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
