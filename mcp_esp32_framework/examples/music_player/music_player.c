@@ -385,10 +385,106 @@ static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* 
 static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, char* result_json, size_t result_size) {
     log_info("MUSIC", "Starting Bluetooth A2DP melody playback");
     
-    // Call the host function to play melody via Bluetooth A2DP
-    if (bluetooth_play_melody(melody, volume) != 0) {
+    // Convert note names to frequencies (same as I2S version)
+    // Allocate dynamic buffer with 3x expansion factor for frequency conversion
+    size_t melody_len = strlen(melody);
+    size_t frequency_buffer_size = melody_len * 3 + 1;  // 3x expansion + null terminator
+    char* frequency_melody = malloc(frequency_buffer_size);
+    if (!frequency_melody) {
+        return mcp_error(-5, "Failed to allocate memory for frequency melody buffer");
+    }
+    frequency_melody[0] = '\0';  // Initialize empty string
+    
+    char* melody_copy = malloc(melody_len + 1);
+    if (!melody_copy) {
+        free(frequency_melody);
+        return mcp_error(-5, "Failed to allocate memory for melody parsing");
+    }
+    strcpy(melody_copy, melody);
+
+    log_info("MUSIC", "Bluetooth: Converting notes to frequencies");
+    
+    char* note_token = melody_copy;
+    char* next_comma = NULL;
+    int first_note = 1;
+    
+    // Process each note and convert to frequency
+    while (note_token && *note_token) {
+        // Find next comma or end of string
+        next_comma = strstr(note_token, ",");
+        if (next_comma) {
+            *next_comma = '\0';  // Terminate current note string
+        }
+        
+        // Skip whitespace
+        while (*note_token == ' ' || *note_token == '\t') {
+            note_token++;
+        }
+        
+        if (*note_token) {  // If we have a note to process
+            // Parse note and duration
+            char note_name[MAX_NOTE_LENGTH];
+            int duration;
+            
+            if (parse_note_duration(note_token, note_name, &duration) == 0) {
+                // Get frequency for the note
+                float freq = get_note_frequency(note_name);
+                if (freq <= 0.0f) {
+                    free(melody_copy);
+                    free(frequency_melody);
+                    return mcp_error(-6, "Unknown note name");
+                }
+                
+                // Add to frequency melody string with safety checks
+                size_t current_len = strlen(frequency_melody);
+                char freq_str[32];
+                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
+                
+                // Calculate space needed
+                size_t comma_len = first_note ? 0 : 1;  // comma if not first note
+                size_t freq_len = strlen(freq_str);
+                size_t total_needed = current_len + comma_len + freq_len + 1; // +1 for null terminator
+                
+                if (total_needed >= frequency_buffer_size) {
+                    free(melody_copy);
+                    free(frequency_melody);
+                    return mcp_error(-9, "Frequency melody buffer overflow");
+                }
+                
+                if (!first_note) {
+                    strcat(frequency_melody, ",");
+                }
+                strcat(frequency_melody, freq_str);
+                
+                first_note = 0;
+            } else {
+                free(melody_copy);
+                free(frequency_melody);
+                return mcp_error(-7, "Invalid note format in melody");
+            }
+        }
+        
+        // Move to next note
+        if (next_comma) {
+            note_token = next_comma + 1;
+        } else {
+            break;  // No more notes
+        }
+    }
+    
+    free(melody_copy);
+    
+    log_info("MUSIC", "Bluetooth: Frequency melody ready");
+    log_info("MUSIC", frequency_melody);
+    
+    // Call the host function with frequency melody (not note names)
+    if (bluetooth_play_melody(frequency_melody, volume) != 0) {
+        free(frequency_melody);
         return mcp_error(-10, "Failed to start Bluetooth A2DP melody playback");
     }
+    
+    // Free the frequency melody buffer after successful call to host function
+    free(frequency_melody);
     
     is_playing = true;
     

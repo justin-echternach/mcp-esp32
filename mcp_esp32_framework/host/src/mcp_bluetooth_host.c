@@ -909,7 +909,7 @@ static float a2dp_note_to_frequency(const char* note) {
     return 440.0f;
 }
 
-// Parse melody string into note array
+// Parse melody string into note array (now expects frequencies, not note names)
 static int32_t a2dp_parse_melody(const char* melody_str) {
     if (!melody_str) return -1;
     
@@ -938,9 +938,10 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
     int parsed_count = 0;
     
     while (token && parsed_count < note_count) {
-        // Parse note:duration format (e.g., "C4:500")
+        // Parse frequency:duration format (e.g., "329.63:500")
         char* colon = strchr(token, ':');
         int duration = 500; // Default duration
+        float frequency = 440.0f; // Default frequency (A4)
         
         if (colon) {
             *colon = '\0';
@@ -948,12 +949,17 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
             if (duration <= 0) duration = 500;
         }
         
-        float frequency = a2dp_note_to_frequency(token);
+        // Parse frequency directly (no longer converting from note names)
+        frequency = atof(token);
+        if (frequency <= 0.0f) {
+            ESP_LOGW(TAG, "Invalid frequency: %s, using 440Hz", token);
+            frequency = 440.0f;
+        }
         
         a2dp_melody_notes[parsed_count].frequency = frequency;
         a2dp_melody_notes[parsed_count].duration_ms = duration;
         
-        ESP_LOGD(TAG, "Parsed note %d: %s -> %.2fHz, %dms", parsed_count, token, frequency, duration);
+        ESP_LOGD(TAG, "Parsed note %d: %.2fHz, %dms", parsed_count, frequency, duration);
         
         parsed_count++;
         token = strtok(NULL, ",");
