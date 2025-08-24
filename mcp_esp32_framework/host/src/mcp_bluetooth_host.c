@@ -882,11 +882,20 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
                 memset(data, 0, len);
                 ESP_LOGI(TAG, "Melody playback completed - stopping A2DP streaming");
                 
-                // Stop A2DP streaming gracefully
-                esp_err_t err = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_STOP);
+                // Use SUSPEND instead of STOP to avoid controller crash in sniff mode
+                esp_err_t err = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
                 if (err != ESP_OK) {
-                    ESP_LOGW(TAG, "Failed to stop A2DP media: %s", esp_err_to_name(err));
+                    ESP_LOGW(TAG, "Failed to suspend A2DP media: %s", esp_err_to_name(err));
                 }
+                
+                // Update streaming state
+                a2dp_streaming_active = false;
+                
+                // Small delay to let controller stabilize before sniff mode
+                vTaskDelay(pdMS_TO_TICKS(100));
+                
+                // Restore scan mode after streaming
+                esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
                 
                 return len;
             }
@@ -1138,6 +1147,9 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
         ESP_LOGE(TAG, "Failed to register A2DP data callback: %s", esp_err_to_name(ret));
         return -4;
     }
+    
+    // Set active power mode to prevent sniff mode issues during streaming
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
     
     // Start media transmission - this triggers the audio callback
     ret = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
