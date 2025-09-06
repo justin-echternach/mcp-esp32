@@ -21,6 +21,7 @@
   "files.associations": {
     "string.h": "c",
     "esp_log.h": "c",
-    "esp_avrc_api.h": "c"
+    "esp_avrc_api.h": "c",
+    "cstdint": "c"
   }
 }
