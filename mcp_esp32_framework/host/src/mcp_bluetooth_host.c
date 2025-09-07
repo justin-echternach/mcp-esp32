@@ -1295,11 +1295,15 @@ int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, 
     // Start melody playback
     a2dp_start_melody();
     
-    // Start A2DP streaming (this will trigger the audio callback)
-    if (bluetooth_start_a2dp_streaming(exec_env) != 0) {
-        ESP_LOGE(TAG, "Failed to start A2DP streaming");
-        a2dp_stop_melody();
-        return -4;
+    // Start A2DP streaming only if not already active (this will trigger the audio callback)
+    if (!a2dp_streaming_active) {
+        if (bluetooth_start_a2dp_streaming(exec_env) != 0) {
+            ESP_LOGE(TAG, "Failed to start A2DP streaming");
+            a2dp_stop_melody();
+            return -4;
+        }
+    } else {
+        ESP_LOGI(TAG, "A2DP streaming already active - reusing existing stream");
     }
     
     ESP_LOGI(TAG, "A2DP melody playback started successfully");
