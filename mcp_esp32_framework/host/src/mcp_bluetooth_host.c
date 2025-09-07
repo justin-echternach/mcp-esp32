@@ -32,27 +32,6 @@ static int16_t* a2dp_stream_buffer = NULL;
 static size_t a2dp_buffer_size = 0;
 static bool a2dp_streaming_active = false;
 static float a2dp_stream_time = 0.0f;
-// Removed a2dp_pending_disconnect - no longer disconnecting to avoid sniff mode crash
-
-// Flow control for L2CAP congestion
-static volatile bool a2dp_congested = false;
-static volatile int a2dp_congestion_count = 0;
-static volatile uint32_t a2dp_last_callback_time = 0;
-
-// A2DP audio state tracking (like official coexistence example)
-static esp_a2d_audio_state_t s_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
-
-// A2DP media state machine
-typedef enum {
-    A2DP_MEDIA_STATE_IDLE,
-    A2DP_MEDIA_STATE_STARTING,
-    A2DP_MEDIA_STATE_STARTED,
-    A2DP_MEDIA_STATE_STOPPING
-} a2dp_media_state_t;
-
-static a2dp_media_state_t a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
-static bool a2dp_stop_requested = false;  // Flag to request stop from callback
-static esp_timer_handle_t a2dp_control_timer = NULL;  // Timer for control operations
 
 // A2DP melody state tracking
 typedef struct {
@@ -86,6 +65,7 @@ static void a2dp_cleanup_streaming_buffer(void);
 static int32_t a2dp_audio_callback(uint8_t* data, int32_t len);
 
 // Forward declarations for A2DP melody functions
+static float a2dp_note_to_frequency(const char* note);
 static int32_t a2dp_parse_melody(const char* melody_str);
 static void a2dp_cleanup_melody(void);
 static void a2dp_start_melody(void);
@@ -95,9 +75,6 @@ static void a2dp_stop_melody(void);
 static int32_t a2dp_init_sine_table(void);
 static void a2dp_cleanup_sine_table(void);
 static inline int16_t a2dp_sine_lookup(float phase);
-
-// Forward declaration for control timer
-static void a2dp_control_timer_callback(void* arg);
 
 // Initialize Bluetooth stack
 int32_t bluetooth_init(wasm_exec_env_t exec_env) {
@@ -168,31 +145,29 @@ int32_t bluetooth_init(wasm_exec_env_t exec_env) {
         return -6;
     }
     
-    // CRITICAL: Initialize AVRC controller BEFORE A2DP to avoid internal state issues
-    // The warning "AVRC Controller is expected to be initialized in advance of A2DP"
-    // indicates this order is required for proper operation
-    ret = esp_avrc_ct_register_callback(bt_avrc_callback);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "AVRC register callback failed: %s", esp_err_to_name(ret));
-        return -7;
-    }
-    
-    ret = esp_avrc_ct_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "AVRC init failed: %s", esp_err_to_name(ret));
-        return -8;
-    }
-    
-    // NOW initialize A2DP source (AFTER AVRC as required)
+    // Initialize A2DP source (to stream music TO speakers)
     ret = esp_a2d_register_callback(bt_a2dp_callback);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "A2DP register callback failed: %s", esp_err_to_name(ret));
-        return -9;
+        return -7;
     }
     
     ret = esp_a2d_source_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "A2DP source init failed: %s", esp_err_to_name(ret));
+        return -8;
+    }
+    
+    // Initialize AVRC controller
+    ret = esp_avrc_ct_register_callback(bt_avrc_callback);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "AVRC register callback failed: %s", esp_err_to_name(ret));
+        return -9;
+    }
+    
+    ret = esp_avrc_ct_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "AVRC init failed: %s", esp_err_to_name(ret));
         return -10;
     }
     
@@ -221,8 +196,7 @@ int32_t bluetooth_init(wasm_exec_env_t exec_env) {
     }
     ESP_LOGI(TAG, "Bluetooth device name set to: %s", device_name);
     
-    // Set default GAP parameters - start as connectable for initial pairing
-    // We'll switch to non-connectable after A2DP connection to prevent sniff mode issues
+    // Set default GAP parameters
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
     
     // Initialize state
@@ -256,16 +230,9 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     a2dp_cleanup_sine_table();
     a2dp_cleanup_melody();
     
-    // Clean up control timer if exists
-    if (a2dp_control_timer) {
-        esp_timer_stop(a2dp_control_timer);
-        esp_timer_delete(a2dp_control_timer);
-        a2dp_control_timer = NULL;
-    }
-    
-    // Deinitialize components in reverse order (A2DP before AVRC)
-    esp_a2d_source_deinit();
+    // Deinitialize components in reverse order
     esp_avrc_ct_deinit();
+    esp_a2d_source_deinit();
     esp_bluedroid_disable();
     esp_bluedroid_deinit();
     esp_bt_controller_disable();
@@ -287,9 +254,6 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
 // Start device scanning
 int32_t bluetooth_scan_start(wasm_exec_env_t exec_env, int32_t timeout_sec) {
     ESP_LOGI(TAG, "Starting device scan for %d seconds", timeout_sec);
-    
-    // Ensure we're in discoverable mode for scanning
-    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
     
     // For now, hardcode to audio filter - will add parameter later
     const char* filter_type = "audio";
@@ -486,10 +450,6 @@ int32_t bt_find_device_by_name(const char* device_name) {
 
 // GAP callback for device discovery and pairing events
 void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) {
-    // Only log power management related events to avoid spam
-    if (event == ESP_BT_GAP_MODE_CHG_EVT || event >= 20) {  // Filter interesting events
-        ESP_LOGI(TAG, "🔵 GAP Event: %d", event);
-    }
     switch (event) {
     case ESP_BT_GAP_DISC_RES_EVT: {
         // Device discovered during scan
@@ -678,23 +638,17 @@ void bt_gap_callback(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param) 
     
     case ESP_BT_GAP_MODE_CHG_EVT:
         // GAP mode change event (power save mode changes)
-        ESP_LOGI(TAG, "🔵 GAP mode changed: mode=%d (ACTIVE=0, HOLD=1, SNIFF=2, PARK=3)", param->mode_chg.mode);
-        if (param->mode_chg.mode == 2) {  // Sniff mode
-            ESP_LOGI(TAG, "🔵 ⚠️  Entering SNIFF mode - this should no longer happen with non-connectable mode!");
-        }
+        ESP_LOGD(TAG, "GAP mode changed: mode %d", param->mode_chg.mode);
         break;
     
     default:
-        if (event >= 20) {  // Only log potentially interesting events
-            ESP_LOGI(TAG, "🔵 Unknown GAP event: %d", event);
-        }
+        ESP_LOGD(TAG, "GAP event: %d", event);
         break;
     }
 }
 
 // A2DP callback for audio events
 void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
-    ESP_LOGI(TAG, "📡 A2DP Event: %d", event);
     switch (event) {
     case ESP_A2D_CONNECTION_STATE_EVT: {
         const char* addr_str = bt_addr_to_string(param->conn_stat.remote_bda);
@@ -706,14 +660,6 @@ void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             
             // Store connected device info (important for auto-connections during scan)
             memcpy(g_bt_state.connected_device_addr, param->conn_stat.remote_bda, ESP_BD_ADDR_LEN);
-            
-            // CRITICAL: Set non-connectable mode after connection to prevent sniff mode issues
-            // This follows the pschatzmann library pattern
-            ESP_LOGI(TAG, "Setting non-connectable scan mode to prevent sniff mode crash");
-            esp_err_t err = esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to set non-connectable mode: %s", esp_err_to_name(err));
-            }
             
             // Try to find device name from discovered devices
             bool found_name = false;
@@ -743,37 +689,14 @@ void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
             ESP_LOGI(TAG, "A2DP connecting to %s", addr_str);
             g_bt_state.state = BT_STATE_CONNECTING;
             
-            // Initialize streaming buffer during connection (like official coexistence example)
-            ESP_LOGI(TAG, "Initializing A2DP streaming buffer during connection");
-            if (a2dp_init_streaming_buffer() != 0) {
-                ESP_LOGW(TAG, "Failed to initialize streaming buffer during connection");
-            }
-            
         } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             ESP_LOGI(TAG, "A2DP disconnected from %s", addr_str);
             g_bt_state.a2dp_connected = false;
-            
-            // A2DP disconnected - cleanup like official coexistence example
-            ESP_LOGI(TAG, "Cleaning up A2DP resources during disconnect");
-            
-            // Cleanup streaming buffer and reset streaming state (critical for sniff mode stability)
-            a2dp_cleanup_streaming_buffer();
-            a2dp_streaming_active = false;
-            a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
-            s_audio_state = ESP_A2D_AUDIO_STATE_STOPPED;
-            
-            // Clear connection state
             g_bt_state.state = BT_STATE_IDLE;
+            
+            // Clear connected device info
             memset(g_bt_state.connected_device_addr, 0, ESP_BD_ADDR_LEN);
             memset(g_bt_state.connected_device_name, 0, sizeof(g_bt_state.connected_device_name));
-            ESP_LOGW(TAG, "A2DP disconnected - all resources cleaned up");
-            
-            // Restore connectable mode after disconnect so we can connect again
-            ESP_LOGI(TAG, "Restoring connectable scan mode after disconnect");
-            esp_err_t err = esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "Failed to restore connectable mode: %s", esp_err_to_name(err));
-            }
             
             // Signal connection complete (even for disconnect)
             xEventGroupSetBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
@@ -783,70 +706,17 @@ void bt_a2dp_callback(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param) {
         }
         break;
     }
-    case ESP_A2D_AUDIO_STATE_EVT: {
-        const char* audio_state_str[] = {"Suspended", "Started"};
-        ESP_LOGI(TAG, "🔊 A2DP audio state: %s (state=%d)", 
-                 audio_state_str[param->audio_stat.state], param->audio_stat.state);
-        ESP_LOGI(TAG, "🔊 Current state before audio event: media_state=%d, streaming_active=%d, a2dp_connected=%d", 
-                 a2dp_media_state, a2dp_streaming_active, g_bt_state.a2dp_connected);
-        
-        // Track audio state like official coexistence example
-        s_audio_state = param->audio_stat.state;
-        
-        // Update state machine based on audio state
-        if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED) {
-            ESP_LOGI(TAG, "🔊 Audio STARTED - setting media state to STARTED");
-            a2dp_media_state = A2DP_MEDIA_STATE_STARTED;
-            // Reset congestion tracking when starting
-            a2dp_congested = false;
-            a2dp_congestion_count = 0;
-        } else if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STOPPED) {
-            ESP_LOGI(TAG, "🔊 Audio STOPPED - transitioning to IDLE and marking streaming inactive");
-            a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
-            // Safe to mark streaming inactive when audio fully stopped
-            a2dp_streaming_active = false;
-            ESP_LOGI(TAG, "🔊 State updated: media_state=%d, streaming_active=%d", 
-                     a2dp_media_state, a2dp_streaming_active);
-            
-            // CRITICAL: Reset congestion state after stop
-            a2dp_congested = false;
-            a2dp_congestion_count = 0;
-        }
-        ESP_LOGI(TAG, "🔊 Audio state event processing complete - about to exit handler");
+    case ESP_A2D_AUDIO_STATE_EVT:
+        ESP_LOGI(TAG, "A2DP audio state: %s", 
+                 param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED ? "Started" : "Stopped");
         break;
-    }
     case ESP_A2D_AUDIO_CFG_EVT:
         ESP_LOGI(TAG, "A2DP audio config received - codec ready for streaming");
         break;
-    case ESP_A2D_MEDIA_CTRL_ACK_EVT:
-        ESP_LOGI(TAG, "🎵 A2DP media control ACK: cmd=%d, status=%d", 
-                 param->media_ctrl_stat.cmd, param->media_ctrl_stat.status);
-        ESP_LOGI(TAG, "🎵 Current state before ACK: media_state=%d, streaming_active=%d, a2dp_connected=%d", 
-                 a2dp_media_state, a2dp_streaming_active, g_bt_state.a2dp_connected);
-        
-        // Just log the ACK, no longer triggering disconnect to avoid sniff mode crash
-        if (param->media_ctrl_stat.cmd == ESP_A2D_MEDIA_CTRL_SUSPEND) {
-            ESP_LOGI(TAG, "🎵 SUSPEND ACK received - Media stopped successfully, connection remains active");
-            
-            // Update state on successful suspend
-            if (param->media_ctrl_stat.status == ESP_A2D_MEDIA_CTRL_ACK_SUCCESS) {
-                ESP_LOGI(TAG, "🎵 SUSPEND successful - transitioning to IDLE state");
-                a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
-                // Now safe to mark streaming as inactive
-                a2dp_streaming_active = false;
-                ESP_LOGI(TAG, "🎵 State updated: media_state=%d, streaming_active=%d", 
-                         a2dp_media_state, a2dp_streaming_active);
-            } else {
-                ESP_LOGW(TAG, "🎵 SUSPEND ACK failed with status=%d", param->media_ctrl_stat.status);
-            }
-        }
-        ESP_LOGI(TAG, "🎵 ACK processing complete - about to exit event handler");
-        break;
     default:
-        ESP_LOGI(TAG, "📡 Unknown A2DP event: %d", event);
+        ESP_LOGD(TAG, "A2DP event: %d", event);
         break;
     }
-    ESP_LOGI(TAG, "📡 A2DP callback complete for event %d", event);
 }
 
 // AVRC callback for remote control events  
@@ -935,34 +805,9 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
     static int callback_count = 0;
     callback_count++;
     
-    // FLOW CONTROL: Track callback frequency to detect congestion
-    uint32_t current_time = esp_timer_get_time() / 1000;  // Convert to ms
-    if (a2dp_last_callback_time != 0) {
-        uint32_t delta = current_time - a2dp_last_callback_time;
-        // Normal callback rate should be around 5-10ms
-        // If we're being called too frequently, we're congested
-        if (delta < 3) {  // Less than 3ms between callbacks indicates congestion
-            a2dp_congestion_count++;
-            if (a2dp_congestion_count > 10) {
-                a2dp_congested = true;
-            }
-        } else if (delta > 20) {  // More than 20ms means we've recovered
-            a2dp_congestion_count = 0;
-            a2dp_congested = false;
-        }
-    }
-    a2dp_last_callback_time = current_time;
-    
     // Log every 100th callback to avoid log spam, plus first few
     if (callback_count <= 5 || callback_count % 100 == 0) {
-        ESP_LOGI(TAG, "A2DP callback #%d: data=%p, len=%d, congested=%d", 
-                 callback_count, data, len, a2dp_congested);
-    }
-    
-    // Handle buffer flush request
-    if (len < 0) {
-        ESP_LOGI(TAG, "A2DP callback: Buffer flush requested (len=%d)", len);
-        return 0;  // Return 0 for flush request - this is correct per docs
+        ESP_LOGI(TAG, "A2DP callback #%d: data=%p, len=%d", callback_count, data, len);
     }
     
     // Add NULL pointer checks
@@ -971,8 +816,8 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         return 0;
     }
     
-    if (len == 0) {
-        ESP_LOGW(TAG, "A2DP callback: Zero length");
+    if (len <= 0) {
+        ESP_LOGW(TAG, "A2DP callback: Invalid length %d", len);
         return 0;
     }
     
@@ -983,7 +828,6 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
                      a2dp_stream_buffer, a2dp_streaming_active);
         }
         memset(data, 0, len);
-        // Return len to avoid underflow - stream is not active
         return len;
     }
     
@@ -994,24 +838,14 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         ESP_LOGI(TAG, "A2DP callback: samples=%p, sample_count=%d", samples, sample_count);
     }
     
-    // FLOW CONTROL: If congested, send silence to reduce load
-    if (a2dp_congested) {
-        if (callback_count % 50 == 0) {  // Log occasionally
-            ESP_LOGW(TAG, "A2DP: L2CAP congested (%d callbacks), sending silence", a2dp_congestion_count);
-        }
-        memset(data, 0, len);
-        return len;
-    }
-    
     // Check if we're playing a melody
     if (!a2dp_melody_playing || !a2dp_melody_notes || a2dp_melody_count == 0) {
-        // No melody playing, send silence but keep stream alive
+        // No melody playing, send silence
         if (callback_count <= 3) {
             ESP_LOGI(TAG, "A2DP callback: No melody playing (playing=%d, notes=%p, count=%d)", 
                      a2dp_melody_playing, a2dp_melody_notes, a2dp_melody_count);
         }
         memset(data, 0, len);
-        // Return len with silence to prevent underflow
         return len;
     }
     
@@ -1043,15 +877,10 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             }
             
             if (a2dp_current_note_index >= a2dp_melody_count) {
-                // Melody finished, stop playback
+                // Melody finished - just stop playing, no SUSPEND to avoid crashes
                 a2dp_melody_playing = false;
                 memset(data, 0, len);
-                ESP_LOGI(TAG, "Melody playback completed - requesting stop");
-                
-                // Don't call media_ctrl from callback - use timer
-                a2dp_stop_requested = true;
-                
-                // Return len with silence to prevent underflow until SUSPEND completes
+                ESP_LOGI(TAG, "Melody playback completed - stream continues with silence");
                 return len;
             }
         }
@@ -1071,7 +900,7 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         if (sample_count > 2000) {  // Sanity check - typical is 128-512 samples
             ESP_LOGE(TAG, "A2DP callback: Suspiciously large sample_count=%d", sample_count);
             memset(data, 0, len);
-            return len;  // Return len to prevent underflow
+            return len;
         }
         
         // Calculate phase increment for this frequency
@@ -1086,8 +915,7 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             
             // Generate stereo sine wave using lookup table
             int16_t raw_sample = a2dp_sine_lookup(a2dp_phase);
-            // Reduce volume further to avoid overdriving the Bluetooth stack
-            int16_t sample = (int16_t)((float)raw_sample * volume_scale * 0.3f); // Reduced from 0.5f to 0.3f
+            int16_t sample = (int16_t)((float)raw_sample * volume_scale * 0.5f); // Scale down to prevent clipping
             
             samples[i] = sample;     // Left channel
             samples[i + 1] = sample; // Right channel
@@ -1108,8 +936,6 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             ESP_LOGI(TAG, "A2DP callback: No current note, sending silence");
         }
         memset(data, 0, len);
-        // Return len with silence to prevent underflow
-        return len;
     }
     
     return len;
@@ -1171,6 +997,22 @@ static inline int16_t a2dp_sine_lookup(float phase) {
 }
 
 // A2DP Melody Helper Functions
+
+// Convert note name to frequency (simplified version)
+static float a2dp_note_to_frequency(const char* note) {
+    // Simplified note lookup table - just the basics for now
+    if (strncmp(note, "C4", 2) == 0) return 261.63f;
+    if (strncmp(note, "D4", 2) == 0) return 293.66f;
+    if (strncmp(note, "E4", 2) == 0) return 329.63f;
+    if (strncmp(note, "F4", 2) == 0) return 349.23f;
+    if (strncmp(note, "G4", 2) == 0) return 392.00f;
+    if (strncmp(note, "A4", 2) == 0) return 440.00f;
+    if (strncmp(note, "B4", 2) == 0) return 493.88f;
+    
+    // Default to A4 if note not recognized
+    ESP_LOGW(TAG, "Unknown note: %s, using A4 (440Hz)", note);
+    return 440.0f;
+}
 
 // Parse melody string into note array (now expects frequencies, not note names)
 static int32_t a2dp_parse_melody(const char* melody_str) {
@@ -1283,22 +1125,17 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
     // Reset phase for clean start
     a2dp_phase = 0.0f;
     
-    // Problem 4 Fix: Set state machine
-    a2dp_media_state = A2DP_MEDIA_STATE_STARTING;
-    
     // Register A2DP source data callback
     esp_err_t ret = esp_a2d_source_register_data_callback(a2dp_audio_callback);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register A2DP data callback: %s", esp_err_to_name(ret));
-        a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
         return -4;
     }
     
-    // Problem 3 Fix: Use SUSPEND instead of STOP (START is still correct)
+    // Start media transmission - this triggers the audio callback
     ret = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_START);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start A2DP media transmission: %s", esp_err_to_name(ret));
-        a2dp_media_state = A2DP_MEDIA_STATE_IDLE;
         return -5;
     }
     
@@ -1311,22 +1148,10 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
 int32_t bluetooth_stop_a2dp_streaming(wasm_exec_env_t exec_env) {
     ESP_LOGI(TAG, "Stopping A2DP streaming");
     
-    // Problem 4 Fix: Proper state transition
-    if (a2dp_media_state == A2DP_MEDIA_STATE_STARTED) {
-        a2dp_media_state = A2DP_MEDIA_STATE_STOPPING;
-        
-        // Problem 3 Fix: Use SUSPEND explicitly instead of STOP
-        esp_err_t ret = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
-        if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to suspend A2DP media: %s", esp_err_to_name(ret));
-        }
-    }
-    
     a2dp_streaming_active = false;
-    a2dp_stop_requested = false;
     
-    // Note: Don't unregister callback per official example
-    // esp_a2d_source_register_data_callback(NULL);
+    // Unregister callback
+    esp_a2d_source_register_data_callback(NULL);
     
     // Keep buffer allocated for potential reuse
     ESP_LOGI(TAG, "A2DP streaming stopped");
@@ -1443,95 +1268,12 @@ int32_t bluetooth_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int3
     return -1; // Not implemented yet
 }
 
-// Timer callback to handle control operations outside of audio callback
-static void a2dp_control_timer_callback(void* arg) {
-    // Check if stop was requested from the audio callback
-    if (a2dp_stop_requested) {
-        ESP_LOGI(TAG, "🛑 Processing stop request from timer context");
-        ESP_LOGI(TAG, "🛑 Current state: media_state=%d, streaming_active=%d, a2dp_connected=%d", 
-                 a2dp_media_state, a2dp_streaming_active, g_bt_state.a2dp_connected);
-        a2dp_stop_requested = false;
-        
-        // Stop streaming from timer context (not audio callback)
-        if (a2dp_media_state == A2DP_MEDIA_STATE_STARTED) {
-            ESP_LOGI(TAG, "🛑 Transitioning to STOPPING state");
-            a2dp_media_state = A2DP_MEDIA_STATE_STOPPING;
-            
-            // CRITICAL FIX: Add delay before SUSPEND to prevent sniff mode crash
-            // This gives the Bluetooth controller time to stabilize
-            vTaskDelay(pdMS_TO_TICKS(500));  // 500ms delay
-            
-            // Use SUSPEND explicitly instead of deprecated STOP
-            ESP_LOGI(TAG, "🛑 About to call esp_a2d_media_ctrl(SUSPEND)");
-            esp_err_t err = esp_a2d_media_ctrl(ESP_A2D_MEDIA_CTRL_SUSPEND);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "🛑 Failed to suspend A2DP media from timer: %s", esp_err_to_name(err));
-            } else {
-                ESP_LOGI(TAG, "🛑 SUSPEND command sent successfully");
-            }
-            
-            // Keep streaming_active true until ACK - callback will return silence
-            // This prevents underflow warnings
-            
-            // Add another delay after SUSPEND to prevent immediate sniff mode transition
-            vTaskDelay(pdMS_TO_TICKS(200));  // 200ms delay
-        }
-        
-        ESP_LOGI(TAG, "🛑 Stopping and deleting control timer");
-        // Stop and delete the timer after processing stop
-        if (a2dp_control_timer) {
-            esp_timer_stop(a2dp_control_timer);
-            esp_timer_delete(a2dp_control_timer);
-            a2dp_control_timer = NULL;
-        }
-        ESP_LOGI(TAG, "🛑 Timer processing complete");
-    }
-}
-
 int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, int32_t volume_percent) {
     ESP_LOGI(TAG, "Starting Bluetooth A2DP melody playback");
     
-    // Check if we need to reconnect A2DP (after previous disconnect)
     if (!g_bt_state.a2dp_connected) {
-        // Check if we have a device to reconnect to
-        if (g_bt_state.connected_device_addr[0] == 0) {
-            ESP_LOGE(TAG, "No Bluetooth device connected - cannot play melody");
-            return -1;
-        }
-        
-        ESP_LOGI(TAG, "A2DP not connected, reconnecting for melody playback...");
-        
-        // Clear any previous connection bits
-        xEventGroupClearBits(bt_event_group, BT_CONNECT_COMPLETE_BIT);
-        
-        // Reconnect A2DP to the same device
-        esp_err_t err = esp_a2d_source_connect(g_bt_state.connected_device_addr);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to reconnect A2DP: %s", esp_err_to_name(err));
-            return -1;
-        }
-        
-        // Wait for A2DP reconnection (max 3 seconds)
-        EventBits_t bits = xEventGroupWaitBits(bt_event_group, 
-                                              BT_CONNECT_COMPLETE_BIT,
-                                              pdTRUE,  // Clear on exit
-                                              pdFALSE, // Wait for any bit
-                                              pdMS_TO_TICKS(3000));
-        
-        if (!(bits & BT_CONNECT_COMPLETE_BIT)) {
-            ESP_LOGE(TAG, "A2DP reconnection timeout");
-            return -1;
-        }
-        
-        if (!g_bt_state.a2dp_connected) {
-            ESP_LOGE(TAG, "A2DP reconnection failed");
-            return -1;
-        }
-        
-        ESP_LOGI(TAG, "A2DP reconnected successfully");
-        
-        // Small delay to ensure connection is stable
-        vTaskDelay(pdMS_TO_TICKS(100));
+        ESP_LOGE(TAG, "A2DP not connected - cannot play melody");
+        return -1;
     }
     
     // Parse the melody string into notes
@@ -1558,23 +1300,6 @@ int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, 
         ESP_LOGE(TAG, "Failed to start A2DP streaming");
         a2dp_stop_melody();
         return -4;
-    }
-    
-    // Problem 5 Fix: Create timer to handle control operations outside callback
-    if (!a2dp_control_timer) {
-        esp_timer_create_args_t timer_args = {
-            .callback = a2dp_control_timer_callback,
-            .arg = NULL,
-            .name = "a2dp_control"
-        };
-        
-        esp_err_t err = esp_timer_create(&timer_args, &a2dp_control_timer);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to create A2DP control timer: %s", esp_err_to_name(err));
-        } else {
-            // Start timer to check every 100ms
-            esp_timer_start_periodic(a2dp_control_timer, 100000); // 100ms in microseconds
-        }
     }
     
     ESP_LOGI(TAG, "A2DP melody playback started successfully");

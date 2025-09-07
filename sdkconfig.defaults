@@ -44,6 +44,8 @@ CONFIG_BT_SPP_ENABLED=n
 CONFIG_BT_CLASSIC_ENABLED=y
 CONFIG_BT_ALLOCATION_FROM_SPIRAM_FIRST=y
 CONFIG_BT_BLE_DYNAMIC_ENV_MEMORY=y
+
+# Bluetooth Power Management - Controller config handles sniff mode prevention
 # Disable BLE to save space
 CONFIG_BT_BLE_ENABLED=n
 CONFIG_BT_NIMBLE_ENABLED=n
