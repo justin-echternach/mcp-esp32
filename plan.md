@@ -522,3 +522,136 @@
   };
 
   This keeps everything properly organized within the framework structure.
+
+## Music Composition Enhancement Features
+
+### Current Implementation
+- Simple Note:Duration format (e.g., "C4:500,D4:750,E4:1000")
+- Single notes played sequentially
+- Global volume control
+- Bluetooth A2DP and local I2S output support
+
+### Planned Enhancements for LLM Music Collaboration
+
+#### 1. **Chord Support** (PRIORITY)
+Play multiple notes simultaneously for harmony:
+- Format: `"[C4,E4,G4]:500"` - C major chord for 500ms
+- Implementation approach:
+  - Mix multiple sine waves in the audio callback
+  - Sum and normalize to prevent clipping
+  - Support 2-4 simultaneous notes initially
+- Benefits:
+  - Enables full harmonic progressions
+  - Much richer, professional sound
+  - Essential for most musical styles
+
+#### 2. **Per-Note Dynamics/Velocity**
+Individual note volume for expression:
+- Format: `"C4:500:80"` - Note, duration, velocity (0-127 MIDI standard)
+- Enables crescendos, diminuendos, accents
+- Natural phrasing and musical expression
+
+#### 3. **Rest Support**
+Silence between notes for rhythm:
+- Format: `"C4:250,R:250,D4:250"` - Note, rest, note
+- Essential for proper rhythmic patterns
+- Creates musical "breathing room"
+
+#### 4. **Articulation Markers**
+Note playing styles:
+- Staccato (`.`): `"C4:500."` - Play 50% duration, rest 50%
+- Legato (`~`): `"C4:500~,D4:500"` - Smooth transition
+- Adds musical character and style
+
+#### 5. **Tempo/BPM Support**
+Musical time instead of milliseconds:
+- Set tempo: `"@120"` at start (120 BPM)
+- Note values: `"C4:q"` (quarter), `"D4:h"` (half), `"E4:e"` (eighth)
+- More intuitive for musical thinking
+- Easier tempo adjustments
+
+#### 6. **Simple Envelope Control**
+Basic ADSR (Attack/Decay/Sustain/Release):
+- Global settings initially
+- Shapes how notes start and end
+- Creates more natural instrument sounds
+
+#### 7. **Vibrato/Pitch Bend**
+Pitch modulation effects:
+- Format: `"C4:500:v5"` - Add 5Hz vibrato
+- Pitch slides: `"C4>C#4:500"` - Slide from C to C#
+- Adds expressiveness and emotion
+
+#### 8. **Pattern/Loop Support**
+Repeat sections efficiently:
+- Format: `"|:C4,D4,E4:|x3"` - Repeat 3 times
+- Reduces redundancy in melodies
+- Enables rhythm patterns
+
+#### 9. **Waveform Selection**
+Different timbres beyond sine waves:
+- Format: `"C4:500:square"` or `"C4:500:tri"`
+- Options: sine, square, triangle, sawtooth
+- Dramatically different sound characters
+
+#### 10. **Micro-timing/Humanization**
+Subtle timing variations:
+- Add slight randomness to timing
+- Makes performances less robotic
+- Jazz swing feel support
+
+### Implementation Priority for Demo
+
+**Phase 1 - Core Enhancements:**
+1. Chord support - Maximum impact on sound quality
+2. Rest support - Essential for rhythm
+3. Per-note dynamics - Adds expression
+
+**Phase 2 - Musical Features:**
+4. Tempo/BPM - More intuitive for users
+5. Articulation (staccato/legato) - Musical style
+6. Simple envelopes - Natural sound
+
+**Phase 3 - Advanced Features:**
+7. Vibrato/pitch bend - Expressiveness
+8. Pattern support - Efficiency
+9. Waveform selection - Timbral variety
+10. Humanization - Professional feel
+
+### User Interaction Examples
+
+With these enhancements, the LLM collaboration becomes much richer:
+
+- User: "Add a C major chord at the beginning"
+- LLM: Adds `"[C4,E4,G4]:1000"` to melody
+
+- User: "Make it more dramatic with dynamics"
+- LLM: Adjusts velocities: `"C4:500:40,D4:500:60,E4:500:100"`
+
+- User: "Add some breathing space"
+- LLM: Inserts rests: `"C4:500,R:250,D4:500"`
+
+- User: "Make it jazzy with swing"
+- LLM: Adjusts timing and adds syncopation
+
+- User: "The ending needs more impact"
+- LLM: Adds final chord with high velocity: `"[C4,E4,G4,C5]:2000:127"`
+
+### Technical Considerations
+
+**Memory Impact:**
+- Chord mixing requires multiple phase accumulators
+- Pattern storage needs buffer management
+- Minimal impact with current PSRAM availability
+
+**Performance:**
+- Mixing multiple waveforms in real-time
+- Need efficient sine/square/triangle generation
+- Consider lookup tables for all waveforms
+
+**Backwards Compatibility:**
+- Keep simple format working
+- Extensions are optional
+- Graceful degradation if features unsupported
+
+This enhancement roadmap transforms the ESP32 from a simple melody player into a genuine musical instrument that composers can shape through natural conversation with the LLM!
