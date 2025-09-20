@@ -869,12 +869,10 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             // Move to next note
             a2dp_current_note_index++;
             a2dp_note_start_time_us = current_time_us;
-            
-            // Reset phases for clean chord transitions
-            for (int i = 0; i < MAX_CHORD_NOTES; i++) {
-                a2dp_phases[i] = 0.0f;
-            }
-            
+
+            // Don't reset phases - maintain continuity between notes/chords
+            // This prevents clicks/pops at transitions
+
             if (a2dp_current_note_index < a2dp_melody_count) {
                 a2dp_note_t* next_note = &a2dp_melody_notes[a2dp_current_note_index];
                 if (next_note->frequency_count > 1) {
@@ -903,10 +901,31 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
     if (a2dp_current_note_index < a2dp_melody_count) {
         a2dp_note_t* current_note = &a2dp_melody_notes[a2dp_current_note_index];
         float volume_scale = (float)a2dp_melody_volume / 100.0f;
-        
+
+        // Calculate envelope for smooth transitions (20ms fade in/out)
+        const int fade_duration_ms = 20;
+        float envelope = 1.0f;
+
+        // Fade in at the beginning of the note
+        if (elapsed_ms < fade_duration_ms) {
+            envelope = (float)elapsed_ms / (float)fade_duration_ms;
+        }
+        // Fade out at the end of the note
+        else if (elapsed_ms > current_note->duration_ms - fade_duration_ms) {
+            int remaining_ms = current_note->duration_ms - elapsed_ms;
+            if (remaining_ms > 0) {
+                envelope = (float)remaining_ms / (float)fade_duration_ms;
+            } else {
+                envelope = 0.0f;
+            }
+        }
+
+        // Apply envelope to volume
+        volume_scale *= envelope;
+
         if (callback_count <= 3) {
-            ESP_LOGI(TAG, "A2DP callback: Generating audio - %d frequencies, vol=%.2f", 
-                     current_note->frequency_count, volume_scale);
+            ESP_LOGI(TAG, "A2DP callback: Generating audio - %d frequencies, vol=%.2f, env=%.2f",
+                     current_note->frequency_count, volume_scale, envelope);
         }
         
         // Add bounds check for sample array access
@@ -1136,11 +1155,8 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
             a2dp_melody_notes[parsed_count].duration_ms = duration;
             
             ESP_LOGD(TAG, "Parsed chord %d: %d frequencies, %dms", parsed_count, freq_count, duration);
-            
-            // Reset phases for new chord
-            for (int i = 0; i < MAX_CHORD_NOTES; i++) {
-                a2dp_phases[i] = 0.0f;
-            }
+
+            // Don't reset phases - maintain continuity between chords
         } else {
             // Single frequency
             float frequency = atof(token);
