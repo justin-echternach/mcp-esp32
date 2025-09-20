@@ -1041,32 +1041,61 @@ static float a2dp_note_to_frequency(const char* note) {
 // Parse melody string into note array (now expects frequencies, not note names)
 static int32_t a2dp_parse_melody(const char* melody_str) {
     if (!melody_str) return -1;
-    
+
     // Clean up any existing melody
     a2dp_cleanup_melody();
-    
-    // Count notes first
+
+    // Count notes first - skip commas inside brackets
     int note_count = 1; // At least one note
+    int in_bracket = 0;
     for (const char* p = melody_str; *p; p++) {
-        if (*p == ',') note_count++;
+        if (*p == '[') {
+            in_bracket = 1;
+        } else if (*p == ']') {
+            in_bracket = 0;
+        } else if (*p == ',' && !in_bracket) {
+            note_count++;
+        }
     }
-    
+
     // Allocate memory for notes
     a2dp_melody_notes = (a2dp_note_t*)mcp_malloc(note_count * sizeof(a2dp_note_t));
     if (!a2dp_melody_notes) {
         ESP_LOGE(TAG, "Failed to allocate memory for melody notes");
         return -1;
     }
-    
-    // Parse notes
+
+    // Parse notes - manual tokenization to handle brackets
     char melody_copy[512];
     strncpy(melody_copy, melody_str, sizeof(melody_copy) - 1);
     melody_copy[sizeof(melody_copy) - 1] = '\0';
-    
-    char* token = strtok(melody_copy, ",");
+
     int parsed_count = 0;
-    
-    while (token && parsed_count < note_count) {
+    char* current = melody_copy;
+
+    while (*current && parsed_count < note_count) {
+        // Find the end of this token (next comma not in brackets, or end of string)
+        char* token_end = current;
+        int bracket_depth = 0;
+
+        while (*token_end) {
+            if (*token_end == '[') {
+                bracket_depth++;
+            } else if (*token_end == ']') {
+                bracket_depth--;
+            } else if (*token_end == ',' && bracket_depth == 0) {
+                break;  // Found the separator
+            }
+            token_end++;
+        }
+
+        // Null-terminate the token
+        char saved_char = *token_end;
+        *token_end = '\0';
+
+        // Now 'current' points to the complete token (including brackets if it's a chord)
+        char* token = current;
+
         // Parse frequency:duration format (e.g., "329.63:500" or "[261.63,329.63,392.00]:500")
         char* colon = strchr(token, ':');
         int duration = 500; // Default duration
@@ -1128,7 +1157,14 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
         }
         
         parsed_count++;
-        token = strtok(NULL, ",");
+
+        // Restore the saved character and move to next token
+        *token_end = saved_char;
+        if (saved_char == ',') {
+            current = token_end + 1;
+        } else {
+            break;  // End of string
+        }
     }
     
     a2dp_melody_count = parsed_count;
