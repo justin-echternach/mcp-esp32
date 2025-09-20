@@ -6,7 +6,7 @@
 
 // Configuration
 #define DEFAULT_VOLUME 50  // 0-100%
-#define MAX_NOTE_LENGTH 8  // "C#7:1000"
+#define MAX_NOTE_LENGTH 32  // Increased for chords like "[C4,E4,G4,B4]:1000"
 #define MAX_MELODY_LENGTH 2048
 
 // Note frequency table (A4 = 440Hz reference)
@@ -155,6 +155,7 @@ static bool is_playing = false;
 
 // Forward declarations
 static float get_note_frequency(const char* note);
+static int parse_chord_to_frequencies(const char* chord_str, char* freq_out, size_t freq_out_size);
 static int parse_note_duration(const char* note_with_duration, char* note_out, int* duration_out);
 static mcp_result_t play_single_note(const char* note, int duration, int volume);
 static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* result_json, size_t result_size);
@@ -276,7 +277,7 @@ static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* 
         return mcp_error(-5, "Failed to allocate memory for frequency melody buffer");
     }
     frequency_melody[0] = '\0';  // Initialize empty string
-    
+
     char* melody_copy = malloc(melody_len + 1);
     if (!melody_copy) {
         free(frequency_melody);
@@ -286,15 +287,34 @@ static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* 
 
     log_info("MUSIC", "Melody copy ...");
     log_info("MUSIC", melody_copy);
-    
+
     char* note_token = melody_copy;
     char* next_comma = NULL;
     int first_note = 1;
-    
+
     // Process each note and convert to frequency
     while (note_token && *note_token) {
-        // Find next comma or end of string
-        next_comma = strstr(note_token, ",");
+        // Handle chords specially - find matching bracket first
+        if (*note_token == '[') {
+            // Find the closing bracket
+            char* close_bracket = strstr(note_token, "]");
+            if (close_bracket) {
+                // Find comma after the closing bracket (after duration)
+                char* after_bracket = close_bracket + 1;
+                // Skip the colon and duration to find the next comma
+                while (*after_bracket && *after_bracket != ',') {
+                    after_bracket++;
+                }
+                next_comma = (*after_bracket == ',') ? after_bracket : NULL;
+            } else {
+                // No closing bracket, treat as error
+                next_comma = strstr(note_token, ",");
+            }
+        } else {
+            // Regular note, find next comma
+            next_comma = strstr(note_token, ",");
+        }
+
         if (next_comma) {
             *next_comma = '\0';  // Terminate current note string
         }
@@ -310,18 +330,31 @@ static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* 
             int duration;
             
             if (parse_note_duration(note_token, note_name, &duration) == 0) {
-                // Get frequency for the note
-                float freq = get_note_frequency(note_name);
-                if (freq <= 0.0f) {
-                    free(melody_copy);
-                    free(frequency_melody);
-                    return mcp_error(-6, "Unknown note name");
+                char freq_str[128];  // Increased size for chord frequencies
+                
+                // Check if it's a chord (starts with '[')
+                if (note_name[0] == '[') {
+                    // Parse chord and convert to frequencies
+                    char chord_freqs[128];
+                    if (parse_chord_to_frequencies(note_name, chord_freqs, sizeof(chord_freqs)) != 0) {
+                        free(melody_copy);
+                        free(frequency_melody);
+                        return mcp_error(-6, "Failed to parse chord");
+                    }
+                    snprintf(freq_str, sizeof(freq_str), "%s:%d", chord_freqs, duration);
+                } else {
+                    // Single note - get frequency
+                    float freq = get_note_frequency(note_name);
+                    if (freq <= 0.0f) {
+                        free(melody_copy);
+                        free(frequency_melody);
+                        return mcp_error(-6, "Unknown note name");
+                    }
+                    snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
                 }
                 
                 // Add to frequency melody string with safety checks
                 size_t current_len = strlen(frequency_melody);
-                char freq_str[32];
-                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
                 
                 // Calculate space needed
                 size_t comma_len = first_note ? 0 : 1;  // comma if not first note
@@ -403,15 +436,34 @@ static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, c
     strcpy(melody_copy, melody);
 
     log_info("MUSIC", "Bluetooth: Converting notes to frequencies");
-    
+
     char* note_token = melody_copy;
     char* next_comma = NULL;
     int first_note = 1;
-    
+
     // Process each note and convert to frequency
     while (note_token && *note_token) {
-        // Find next comma or end of string
-        next_comma = strstr(note_token, ",");
+        // Handle chords specially - find matching bracket first
+        if (*note_token == '[') {
+            // Find the closing bracket
+            char* close_bracket = strstr(note_token, "]");
+            if (close_bracket) {
+                // Find comma after the closing bracket (after duration)
+                char* after_bracket = close_bracket + 1;
+                // Skip the colon and duration to find the next comma
+                while (*after_bracket && *after_bracket != ',') {
+                    after_bracket++;
+                }
+                next_comma = (*after_bracket == ',') ? after_bracket : NULL;
+            } else {
+                // No closing bracket, treat as error
+                next_comma = strstr(note_token, ",");
+            }
+        } else {
+            // Regular note, find next comma
+            next_comma = strstr(note_token, ",");
+        }
+
         if (next_comma) {
             *next_comma = '\0';  // Terminate current note string
         }
@@ -427,18 +479,31 @@ static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, c
             int duration;
             
             if (parse_note_duration(note_token, note_name, &duration) == 0) {
-                // Get frequency for the note
-                float freq = get_note_frequency(note_name);
-                if (freq <= 0.0f) {
-                    free(melody_copy);
-                    free(frequency_melody);
-                    return mcp_error(-6, "Unknown note name");
+                char freq_str[128];  // Increased size for chord frequencies
+                
+                // Check if it's a chord (starts with '[')
+                if (note_name[0] == '[') {
+                    // Parse chord and convert to frequencies
+                    char chord_freqs[128];
+                    if (parse_chord_to_frequencies(note_name, chord_freqs, sizeof(chord_freqs)) != 0) {
+                        free(melody_copy);
+                        free(frequency_melody);
+                        return mcp_error(-6, "Failed to parse chord");
+                    }
+                    snprintf(freq_str, sizeof(freq_str), "%s:%d", chord_freqs, duration);
+                } else {
+                    // Single note - get frequency
+                    float freq = get_note_frequency(note_name);
+                    if (freq <= 0.0f) {
+                        free(melody_copy);
+                        free(frequency_melody);
+                        return mcp_error(-6, "Unknown note name");
+                    }
+                    snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
                 }
                 
                 // Add to frequency melody string with safety checks
                 size_t current_len = strlen(frequency_melody);
-                char freq_str[32];
-                snprintf(freq_str, sizeof(freq_str), "%.2f:%d", freq, duration);
                 
                 // Calculate space needed
                 size_t comma_len = first_note ? 0 : 1;  // comma if not first note
@@ -595,7 +660,98 @@ static float get_note_frequency(const char* note) {
     return 0.0f; // Note not found
 }
 
+// Helper: Parse chord notation "[C4,E4,G4]" and convert to frequencies
+static int parse_chord_to_frequencies(const char* chord_str, char* freq_out, size_t freq_out_size) {
+    if (!chord_str || !freq_out) return -1;
+
+    log_info("MUSIC", "parse_chord_to_frequencies: input chord_str:");
+    log_info("MUSIC", chord_str);
+
+    // Skip the opening bracket
+    const char* ptr = chord_str;
+    if (*ptr == '[') ptr++;
+
+    // Find closing bracket
+    const char* end_bracket = strstr(ptr, "]");
+    if (!end_bracket) {
+        log_info("MUSIC", "parse_chord_to_frequencies: No closing bracket found");
+        return -1;
+    }
+    
+    // Create working copy
+    int chord_len = end_bracket - ptr;
+    char* chord_copy = malloc(chord_len + 1);
+    if (!chord_copy) {
+        log_info("MUSIC", "parse_chord_to_frequencies: Failed to allocate memory");
+        return -1;
+    }
+    strncpy(chord_copy, ptr, chord_len);
+    chord_copy[chord_len] = '\0';
+
+    log_info("MUSIC", "parse_chord_to_frequencies: chord_copy:");
+    log_info("MUSIC", chord_copy);
+
+    // Parse individual notes in the chord
+    freq_out[0] = '[';
+    freq_out[1] = '\0';
+
+    char* note_ptr = chord_copy;
+    int first_note = 1;
+
+    while (note_ptr && *note_ptr) {
+        // Find next comma or end
+        char* comma = strstr(note_ptr, ",");
+        if (comma) *comma = '\0';
+
+        // Skip whitespace
+        while (*note_ptr == ' ' || *note_ptr == '\t') note_ptr++;
+
+        if (*note_ptr) {
+            log_info("MUSIC", "parse_chord_to_frequencies: Processing note:");
+            log_info("MUSIC", note_ptr);
+
+            // Get frequency for this note
+            float freq = get_note_frequency(note_ptr);
+            if (freq <= 0.0f) {
+                log_info("MUSIC", "parse_chord_to_frequencies: Failed to get frequency for note");
+                free(chord_copy);
+                return -1;
+            }
+            
+            // Add to output
+            char freq_str[32];
+            if (!first_note) {
+                strcat(freq_out, ",");
+            }
+            snprintf(freq_str, sizeof(freq_str), "%.2f", freq);
+            
+            // Check buffer space
+            if (strlen(freq_out) + strlen(freq_str) + 2 >= freq_out_size) {
+                free(chord_copy);
+                return -1;
+            }
+            
+            strcat(freq_out, freq_str);
+            first_note = 0;
+        }
+        
+        // Move to next note
+        if (comma) {
+            note_ptr = comma + 1;
+        } else {
+            break;
+        }
+    }
+    
+    strcat(freq_out, "]");
+    log_info("MUSIC", "parse_chord_to_frequencies: Final freq_out:");
+    log_info("MUSIC", freq_out);
+    free(chord_copy);
+    return 0;
+}
+
 // Helper: Parse note with optional duration "C4:500" -> note="C4", duration=500
+// Now also handles chords: "[C4,E4,G4]:500"
 static int parse_note_duration(const char* note_with_duration, char* note_out, int* duration_out) {
     if (!note_with_duration || !note_out || !duration_out) return -1;
     
@@ -772,7 +928,7 @@ static mcp_tool_t music_tools[] = {
     {
         .name = "play_melody", 
         .description = "Play a sequence of notes as a melody via local I2S or Bluetooth A2DP",
-        .input_schema = "{\"type\":\"object\",\"properties\":{\"melody\":{\"type\":\"string\",\"description\":\"Comma-separated notes (e.g. 'C4:500,D4,E4')\"},\"volume\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"output\":{\"type\":\"string\",\"enum\":[\"local\",\"bluetooth\",\"both\"],\"default\":\"local\",\"description\":\"Output: local I2S or bluetooth A2DP\"}},\"required\":[\"melody\"]}",
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"melody\":{\"type\":\"string\",\"description\":\"Comma-separated notes (e.g. 'C4:500,D4,E4' or with chords 'C4:500,[C4,D4,E4]:500,A4')\"},\"volume\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":100},\"output\":{\"type\":\"string\",\"enum\":[\"local\",\"bluetooth\",\"both\"],\"default\":\"local\",\"description\":\"Output: local I2S or bluetooth A2DP\"}},\"required\":[\"melody\"]}",
         .handler = play_melody_handler
     },
     {

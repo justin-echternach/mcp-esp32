@@ -34,8 +34,11 @@ static bool a2dp_streaming_active = false;
 static float a2dp_stream_time = 0.0f;
 
 // A2DP melody state tracking
+#define MAX_CHORD_NOTES 4  // Support up to 4 simultaneous notes in a chord
+
 typedef struct {
-    float frequency;
+    float frequencies[MAX_CHORD_NOTES];  // Array of frequencies for chord support
+    int frequency_count;                 // Number of notes in this chord (1 for single note)
     int duration_ms;
 } a2dp_note_t;
 
@@ -56,8 +59,8 @@ static bool a2dp_melody_playing = false;
 #define SINE_TABLE_SHIFT 10  // log2(SINE_TABLE_SIZE)
 static int16_t* sine_lookup_table = NULL;
 
-// Audio generation state for phase continuity
-static float a2dp_phase = 0.0f;  // Current phase (0.0 to 1.0)
+// Audio generation state for phase continuity (one per chord note)
+static float a2dp_phases[MAX_CHORD_NOTES] = {0.0f, 0.0f, 0.0f, 0.0f};  // Current phases for each note in chord
 
 // Forward declarations for A2DP streaming functions
 static int32_t a2dp_init_streaming_buffer(void);
@@ -867,10 +870,20 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             a2dp_current_note_index++;
             a2dp_note_start_time_us = current_time_us;
             
+            // Reset phases for clean chord transitions
+            for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+                a2dp_phases[i] = 0.0f;
+            }
+            
             if (a2dp_current_note_index < a2dp_melody_count) {
-                ESP_LOGI(TAG, "A2DP: Advanced to note %d (frequency=%.1fHz)", 
-                         a2dp_current_note_index, 
-                         a2dp_melody_notes[a2dp_current_note_index].frequency);
+                a2dp_note_t* next_note = &a2dp_melody_notes[a2dp_current_note_index];
+                if (next_note->frequency_count > 1) {
+                    ESP_LOGI(TAG, "A2DP: Advanced to chord %d (%d frequencies)", 
+                             a2dp_current_note_index, next_note->frequency_count);
+                } else {
+                    ESP_LOGI(TAG, "A2DP: Advanced to note %d (frequency=%.1fHz)", 
+                             a2dp_current_note_index, next_note->frequencies[0]);
+                }
             } else {
                 ESP_LOGI(TAG, "A2DP: Advanced past final note (%d >= %d)", 
                          a2dp_current_note_index, a2dp_melody_count);
@@ -886,14 +899,14 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         }
     }
     
-    // Generate audio for current note
+    // Generate audio for current note or chord
     if (a2dp_current_note_index < a2dp_melody_count) {
-        float frequency = a2dp_melody_notes[a2dp_current_note_index].frequency;
+        a2dp_note_t* current_note = &a2dp_melody_notes[a2dp_current_note_index];
         float volume_scale = (float)a2dp_melody_volume / 100.0f;
         
         if (callback_count <= 3) {
-            ESP_LOGI(TAG, "A2DP callback: Generating audio - freq=%.1fHz, vol=%.2f", 
-                     frequency, volume_scale);
+            ESP_LOGI(TAG, "A2DP callback: Generating audio - %d frequencies, vol=%.2f", 
+                     current_note->frequency_count, volume_scale);
         }
         
         // Add bounds check for sample array access
@@ -903,8 +916,11 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             return len;
         }
         
-        // Calculate phase increment for this frequency
-        float phase_increment = frequency / (float)A2DP_SAMPLE_RATE;
+        // Calculate phase increments for all frequencies in the chord
+        float phase_increments[MAX_CHORD_NOTES];
+        for (int n = 0; n < current_note->frequency_count; n++) {
+            phase_increments[n] = current_note->frequencies[n] / (float)A2DP_SAMPLE_RATE;
+        }
         
         for (int32_t i = 0; i < sample_count; i += 2) {
             // Safety check before array access
@@ -913,18 +929,26 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
                 break;
             }
             
-            // Generate stereo sine wave using lookup table
-            int16_t raw_sample = a2dp_sine_lookup(a2dp_phase);
-            int16_t sample = (int16_t)((float)raw_sample * volume_scale * 0.5f); // Scale down to prevent clipping
+            // Mix all frequencies in the chord
+            float mixed_sample = 0.0f;
+            for (int n = 0; n < current_note->frequency_count; n++) {
+                // Generate sine wave for each frequency
+                int16_t raw_sample = a2dp_sine_lookup(a2dp_phases[n]);
+                // Simple average mixing to prevent clipping
+                mixed_sample += (float)raw_sample / current_note->frequency_count;
+                
+                // Advance phase with wrap-around for continuity
+                a2dp_phases[n] += phase_increments[n];
+                if (a2dp_phases[n] >= 1.0f) {
+                    a2dp_phases[n] -= 1.0f;
+                }
+            }
+            
+            // Apply volume and convert to int16_t
+            int16_t sample = (int16_t)(mixed_sample * volume_scale * 0.5f); // Scale down to prevent clipping
             
             samples[i] = sample;     // Left channel
             samples[i + 1] = sample; // Right channel
-            
-            // Advance phase with wrap-around for continuity
-            a2dp_phase += phase_increment;
-            if (a2dp_phase >= 1.0f) {
-                a2dp_phase -= 1.0f;
-            }
         }
         
         if (callback_count <= 3) {
@@ -1043,10 +1067,9 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
     int parsed_count = 0;
     
     while (token && parsed_count < note_count) {
-        // Parse frequency:duration format (e.g., "329.63:500")
+        // Parse frequency:duration format (e.g., "329.63:500" or "[261.63,329.63,392.00]:500")
         char* colon = strchr(token, ':');
         int duration = 500; // Default duration
-        float frequency = 440.0f; // Default frequency (A4)
         
         if (colon) {
             *colon = '\0';
@@ -1054,17 +1077,55 @@ static int32_t a2dp_parse_melody(const char* melody_str) {
             if (duration <= 0) duration = 500;
         }
         
-        // Parse frequency directly (no longer converting from note names)
-        frequency = atof(token);
-        if (frequency <= 0.0f) {
-            ESP_LOGW(TAG, "Invalid frequency: %s, using 440Hz", token);
-            frequency = 440.0f;
+        // Check if this is a chord (starts with '[')
+        if (token[0] == '[') {
+            // Parse chord frequencies
+            char* chord_start = token + 1;  // Skip '['
+            char* chord_end = strchr(chord_start, ']');
+            if (chord_end) {
+                *chord_end = '\0';  // Terminate at ']'
+            }
+            
+            // Parse individual frequencies in the chord
+            char chord_copy[128];
+            strncpy(chord_copy, chord_start, sizeof(chord_copy) - 1);
+            chord_copy[sizeof(chord_copy) - 1] = '\0';
+            
+            int freq_count = 0;
+            char* freq_token = strtok(chord_copy, ",");
+            
+            while (freq_token && freq_count < MAX_CHORD_NOTES) {
+                float frequency = atof(freq_token);
+                if (frequency > 0.0f) {
+                    a2dp_melody_notes[parsed_count].frequencies[freq_count] = frequency;
+                    freq_count++;
+                }
+                freq_token = strtok(NULL, ",");
+            }
+            
+            a2dp_melody_notes[parsed_count].frequency_count = freq_count;
+            a2dp_melody_notes[parsed_count].duration_ms = duration;
+            
+            ESP_LOGD(TAG, "Parsed chord %d: %d frequencies, %dms", parsed_count, freq_count, duration);
+            
+            // Reset phases for new chord
+            for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+                a2dp_phases[i] = 0.0f;
+            }
+        } else {
+            // Single frequency
+            float frequency = atof(token);
+            if (frequency <= 0.0f) {
+                ESP_LOGW(TAG, "Invalid frequency: %s, using 440Hz", token);
+                frequency = 440.0f;
+            }
+            
+            a2dp_melody_notes[parsed_count].frequencies[0] = frequency;
+            a2dp_melody_notes[parsed_count].frequency_count = 1;
+            a2dp_melody_notes[parsed_count].duration_ms = duration;
+            
+            ESP_LOGD(TAG, "Parsed note %d: %.2fHz, %dms", parsed_count, frequency, duration);
         }
-        
-        a2dp_melody_notes[parsed_count].frequency = frequency;
-        a2dp_melody_notes[parsed_count].duration_ms = duration;
-        
-        ESP_LOGD(TAG, "Parsed note %d: %.2fHz, %dms", parsed_count, frequency, duration);
         
         parsed_count++;
         token = strtok(NULL, ",");
@@ -1122,8 +1183,10 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
         return -3;
     }
     
-    // Reset phase for clean start
-    a2dp_phase = 0.0f;
+    // Reset phases for clean start
+    for (int i = 0; i < MAX_CHORD_NOTES; i++) {
+        a2dp_phases[i] = 0.0f;
+    }
     
     // Register A2DP source data callback
     esp_err_t ret = esp_a2d_source_register_data_callback(a2dp_audio_callback);
