@@ -2281,9 +2281,15 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
 
     pthread_mutex_lock(&s_audio_mutex);
 
-    // Stop any current playback (tone or melody) before starting a new tone
+    // Stop any current playback (tone or melody) before starting a new tone.
+    // The melody task stops I2S when it exits, so restart it for the tone.
+    bool melody_was_running = (i2s_melody_task_handle != NULL);
     i2s_stop_melody_locked();
     i2s_stop_tone_locked();
+    if (melody_was_running)
+    {
+        i2s_start(I2S_NUM_0);
+    }
 
     // Set audio parameters
     current_frequency = (float)frequency_hz;

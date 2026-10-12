@@ -344,6 +344,18 @@ esp_err_t mcp_sse_send_simple(httpd_req_t *req, const char* event_type, const ch
     return mcp_sse_send_event(req, &event);
 }
 
+static void mcp_http_wake_noop(void *arg)
+{
+}
+
+void mcp_http_async_complete(httpd_req_t *req) {
+    httpd_handle_t hd = req->handle;
+    httpd_req_async_handler_complete(req);
+    // The server's select() skipped this socket while it was async; queueing a
+    // no-op makes it rebuild its fd set and read the next request on it
+    httpd_queue_work(hd, mcp_http_wake_noop, NULL);
+}
+
 esp_err_t mcp_sse_close_connection(httpd_req_t *req) {
     if (!req) {
         return ESP_ERR_INVALID_ARG;

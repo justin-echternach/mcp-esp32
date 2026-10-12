@@ -43,6 +43,7 @@ typedef struct {
     pthread_mutex_t module_mutex;
     uint8_t *wasm_file_buf;
     uint32_t wasm_file_size;
+    void *watchdog;             // esp_timer that terminates a runaway WASM call
 } mcp_wasm_module_t;
 
 // MCP pthread pool configuration

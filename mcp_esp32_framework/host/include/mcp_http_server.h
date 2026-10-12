@@ -169,6 +169,13 @@ esp_err_t mcp_sse_send_simple(httpd_req_t *req, const char* event_type, const ch
 esp_err_t mcp_sse_close_connection(httpd_req_t *req);
 
 /**
+ * @brief Finish an async request (httpd_req_async_handler_begin) and wake the
+ * server loop. Completing alone doesn't make the server watch the socket again
+ * until something else wakes it, so keep-alive clients would stall.
+ */
+void mcp_http_async_complete(httpd_req_t *req);
+
+/**
  * @brief Register SSE endpoint with session manager integration
  * 
  * @param server HTTP server handle

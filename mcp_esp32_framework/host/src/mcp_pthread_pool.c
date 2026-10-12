@@ -7,6 +7,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include "wasm_export.h"
+#include "mcp_http_server.h"
+#include "esp_timer.h"
 
 static const char *TAG = "mcp-pthread";
 
@@ -16,6 +18,9 @@ static mcp_pthread_pool_t g_pool = {0};
 // Largest request body accepted, and the size of the reply buffer a module writes into
 #define MCP_MAX_REQUEST_BODY (16 * 1024)
 #define MCP_RESPONSE_BUFFER_SIZE (8 * 1024)
+// A single WASM call longer than this is terminated (tools like a Bluetooth scan
+// legitimately take up to ~30s)
+#define MCP_WASM_CALL_TIMEOUT_MS (60 * 1000)
 // External references are now declared in the header file
 
 // Forward declarations
@@ -304,8 +309,14 @@ static void send_mcp_response(mcp_request_t *mcp_req)
         mcp_free(header_buffers[i]);
     }
 
-    httpd_req_async_handler_complete(req);
+    mcp_http_async_complete(req);
     mcp_req->http_req = NULL;
+}
+
+static void wasm_watchdog_cb(void *arg)
+{
+    ESP_LOGE(TAG, "WASM call exceeded %d ms - terminating", MCP_WASM_CALL_TIMEOUT_MS);
+    wasm_runtime_terminate((wasm_module_inst_t)arg);
 }
 
 static void *mcp_worker_thread(void *arg)
@@ -466,12 +477,35 @@ static void process_mcp_request(mcp_request_t *req)
     // Call WASM function: handle_mcp_request(request, response, max_len)
     uint32_t argv[3] = {(uint32_t)request_wasm_buffer, (uint32_t)response_wasm_buffer, response_size};
 
+    // Arm the per-module watchdog (created once, reused for every call)
+    if (!module->watchdog)
+    {
+        const esp_timer_create_args_t wd_args = {
+            .callback = wasm_watchdog_cb,
+            .arg = module->wasm_module_inst,
+            .name = "wasm_watchdog",
+        };
+        esp_timer_handle_t wd = NULL;
+        if (esp_timer_create(&wd_args, &wd) == ESP_OK)
+        {
+            module->watchdog = wd;
+        }
+    }
+
     // Set request context for host functions
     mcp_host_set_request_context(req);
     wasm_runtime_clear_exception(module->wasm_module_inst);
+    if (module->watchdog)
+    {
+        esp_timer_start_once((esp_timer_handle_t)module->watchdog, (uint64_t)MCP_WASM_CALL_TIMEOUT_MS * 1000);
+    }
 
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
 
+    if (module->watchdog)
+    {
+        esp_timer_stop((esp_timer_handle_t)module->watchdog);
+    }
     mcp_host_clear_request_context();
 
     int32_t wasm_return_value = (int32_t)argv[0];
@@ -638,7 +672,7 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
         ESP_LOGE(TAG, "Failed to queue MCP request - pool busy");
         httpd_req_t *async_req = mcp_req->http_req;
         send_http_error(async_req, "503 Service Unavailable", -32000, "Server busy, retry later");
-        httpd_req_async_handler_complete(async_req);
+        mcp_http_async_complete(async_req);
         mcp_request_free(mcp_req);
     }
 

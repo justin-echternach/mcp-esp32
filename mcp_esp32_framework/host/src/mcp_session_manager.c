@@ -20,10 +20,27 @@ static const char* TAG = "MCP_SESSION";
 
 static mcp_session_t g_sessions[MCP_MAX_SESSIONS];
 static pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
-// Serializes every write to an SSE stream (keep-alive pings from the SSE task and
-// events from worker threads) and guards against writing to a stream that is
-// being torn down. Lock order: g_sse_io_mutex, then g_sessions_mutex.
-static pthread_mutex_t g_sse_io_mutex = PTHREAD_MUTEX_INITIALIZER;
+// One I/O lock per session slot. Serializes writes to that slot's SSE stream
+// (keep-alive pings from its SSE task and events from worker threads) and keeps
+// a stream from being completed while an event is being written. Per-slot so a
+// slow client only stalls its own stream.
+// Lock order: g_sse_io_mutex[slot], then g_sessions_mutex.
+static pthread_mutex_t g_sse_io_mutex[MCP_MAX_SESSIONS] = {
+    [0 ... MCP_MAX_SESSIONS - 1] = PTHREAD_MUTEX_INITIALIZER
+};
+
+static int session_slot(const char* session_id) {
+    int slot = -1;
+    pthread_mutex_lock(&g_sessions_mutex);
+    for (int i = 0; i < MCP_MAX_SESSIONS; i++) {
+        if (g_sessions[i].session_id[0] && strcmp(g_sessions[i].session_id, session_id) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+    return slot;
+}
 static bool g_manager_initialized = false;
 static mcp_session_config_t g_config = {
     .max_sessions = MCP_MAX_SESSIONS,
@@ -375,22 +392,21 @@ esp_err_t mcp_session_send_event(const char* session_id, const char* event_type,
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Hold the I/O lock across lookup and send so the stream can't be completed
-    // (freed) by its SSE task while we write to it
-    pthread_mutex_lock(&g_sse_io_mutex);
-    pthread_mutex_lock(&g_sessions_mutex);
-    
-    mcp_session_t* session = find_session_locked(session_id);
-    if (!session) {
-        pthread_mutex_unlock(&g_sessions_mutex);
-        pthread_mutex_unlock(&g_sse_io_mutex);
+    int slot = session_slot(session_id);
+    if (slot < 0) {
         ESP_LOGW(TAG, "Session not found for event: %s", session_id);
         return ESP_ERR_NOT_FOUND;
     }
     
-    if (!session->sse_active || !session->sse_req) {
+    // Hold the slot's I/O lock across lookup and send so the stream can't be
+    // completed (freed) by its SSE task while we write to it
+    pthread_mutex_lock(&g_sse_io_mutex[slot]);
+    pthread_mutex_lock(&g_sessions_mutex);
+    
+    mcp_session_t* session = &g_sessions[slot];
+    if (strcmp(session->session_id, session_id) != 0 || !session->sse_active || !session->sse_req) {
         pthread_mutex_unlock(&g_sessions_mutex);
-        pthread_mutex_unlock(&g_sse_io_mutex);
+        pthread_mutex_unlock(&g_sse_io_mutex[slot]);
         ESP_LOGW(TAG, "No SSE connection for session: %s", session_id);
         return ESP_ERR_INVALID_STATE;
     }
@@ -399,7 +415,7 @@ esp_err_t mcp_session_send_event(const char* session_id, const char* event_type,
     pthread_mutex_unlock(&g_sessions_mutex);
     
     esp_err_t ret = mcp_sse_send_simple(req, event_type, data);
-    pthread_mutex_unlock(&g_sse_io_mutex);
+    pthread_mutex_unlock(&g_sse_io_mutex[slot]);
     
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send SSE event to session %s: %s", 
@@ -592,6 +608,8 @@ typedef struct {
 static void mcp_sse_task(void* arg) {
     mcp_sse_task_ctx_t* ctx = (mcp_sse_task_ctx_t*)arg;
     httpd_req_t* req = ctx->req;
+    int slot = session_slot(ctx->session_id);
+    pthread_mutex_t* io_lock = &g_sse_io_mutex[slot < 0 ? 0 : slot];
     
     uint64_t last_ping = get_timestamp_ms();
     int ping_interval_ms = g_config.sse_keepalive_seconds * 1000;
@@ -602,9 +620,9 @@ static void mcp_sse_task(void* arg) {
         if ((now - last_ping) >= ping_interval_ms) {
             char ping_data[64];
             snprintf(ping_data, sizeof(ping_data), "{\"timestamp\":%llu}", now);
-            pthread_mutex_lock(&g_sse_io_mutex);
+            pthread_mutex_lock(io_lock);
             esp_err_t ret = mcp_sse_send_simple(req, "ping", ping_data);
-            pthread_mutex_unlock(&g_sse_io_mutex);
+            pthread_mutex_unlock(io_lock);
             if (ret != ESP_OK) {
                 ESP_LOGW(TAG, "SSE ping failed, closing connection");
                 break;
@@ -619,10 +637,10 @@ static void mcp_sse_task(void* arg) {
     unregister_sse_if_current(ctx->session_id, req);
     
     // Wait for any in-flight event write, then close and release the request
-    pthread_mutex_lock(&g_sse_io_mutex);
+    pthread_mutex_lock(io_lock);
     mcp_sse_close_connection(req);
-    httpd_req_async_handler_complete(req);
-    pthread_mutex_unlock(&g_sse_io_mutex);
+    mcp_http_async_complete(req);
+    pthread_mutex_unlock(io_lock);
     
     ESP_LOGI(TAG, "SSE stream finished for session: %s", ctx->session_id);
     free(ctx);
@@ -669,7 +687,8 @@ esp_err_t mcp_session_sse_handler(httpd_req_t *req) {
     ret = mcp_session_register_sse(ctx->session_id, ctx->req);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register SSE with session");
-        httpd_req_async_handler_complete(ctx->req);
+        mcp_sse_close_connection(ctx->req);
+        mcp_http_async_complete(ctx->req);
         free(ctx);
         return ESP_OK;
     }
@@ -677,7 +696,8 @@ esp_err_t mcp_session_sse_handler(httpd_req_t *req) {
     if (xTaskCreate(mcp_sse_task, "mcp_sse", 6144, ctx, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Failed to start SSE task");
         unregister_sse_if_current(ctx->session_id, ctx->req);
-        httpd_req_async_handler_complete(ctx->req);
+        mcp_sse_close_connection(ctx->req);
+        mcp_http_async_complete(ctx->req);
         free(ctx);
         return ESP_OK;
     }

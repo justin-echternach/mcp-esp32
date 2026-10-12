@@ -4,6 +4,7 @@
 #include "mcp_host_functions.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -205,6 +206,7 @@ mcp_wasm_module_t* mcp_wasm_load_module_for_route(const char* route, const char*
     strncpy(module->route, route, sizeof(module->route) - 1);
     strncpy(module->wasm_file, wasm_filename, sizeof(module->wasm_file) - 1);
     module->loaded = false;
+    module->watchdog = NULL;
     pthread_mutex_init(&module->module_mutex, NULL);
     
     // Load WASM file
@@ -435,6 +437,11 @@ void mcp_wasm_registry_cleanup(void) {
     // Cleanup all loaded modules
     for (int i = 0; i < g_mcp_module_count; i++) {
         if (g_mcp_modules[i].loaded) {
+            if (g_mcp_modules[i].watchdog) {
+                esp_timer_stop((esp_timer_handle_t)g_mcp_modules[i].watchdog);
+                esp_timer_delete((esp_timer_handle_t)g_mcp_modules[i].watchdog);
+                g_mcp_modules[i].watchdog = NULL;
+            }
             if (g_mcp_modules[i].exec_env) {
                 wasm_runtime_destroy_exec_env(g_mcp_modules[i].exec_env);
             }
