@@ -191,6 +191,42 @@ Working on ESP32-WROVER-E:
 
 In progress: refactoring `mcp_esp32_framework` into a clean drop-in ESP-IDF component, reducing audio popping, and testing on other boards.
 
+## Next step: FPGA laser control
+
+*Design direction — not implemented yet.*
+
+The ESP32 build proves the pattern: an LLM talks MCP to a device, sandboxed WASM modules define what it can do, and host functions are the only path to hardware. The same split maps onto FPGA-based instrument control, such as the laser and RF systems used in atomic-physics and quantum-computing labs.
+
+```
+LLM ──MCP──▶ SoC ARM core (Zynq / RFSoC / Agilex SoC / PolarFire SoC)
+               MCP server + WAMR, sandboxed WASM modules
+                 │  host functions → memory-mapped (AXI) register writes
+                 ▼
+             FPGA fabric: pulse sequencers, DDS, DAC/ADC, trigger logic
+                 │  nanosecond-deterministic timing
+                 ▼
+             lasers · AOMs/AODs · RF drivers · detectors
+```
+
+**What carries over unchanged:** the MCP server, the WAMR runtime, the module SDK and the per-route module loading. A SoC FPGA's ARM cores run Linux, so this is easier than on the ESP32. WAMR also fits on a soft-core CPU (MicroBlaze, Nios V, RISC-V) when there's no hard core.
+
+**What changes is the host function set.** `gpio_set_level` becomes calls such as:
+
+| Host function | Writes to |
+|---|---|
+| `set_dds_frequency(channel, hz)` | DDS tuning-word register |
+| `set_laser_power(channel, fraction)` | DAC / AOM amplitude register |
+| `load_pulse_sequence(buf, len)` | Sequencer BRAM |
+| `arm_trigger()` / `read_counts(buf, len)` | Control / status registers, detector counters |
+
+**Design rules:**
+
+- **The LLM stays out of the real-time loop.** It works at the supervisory level: choosing parameters, building and loading sequences, running calibration scans, interpreting results. The FPGA executes sequences with fixed timing; nothing timing-critical waits on a model or on WASM.
+- **Safety limits replace GPIO pin protection.** Per-channel limits on power, frequency range, duty cycle and interlock state are checked in the host functions (configured like `cfg.jsn`'s `gpio_protection`). They are enforced again in FPGA logic, so no module or model can drive hardware outside its safe envelope.
+- **Each WASM module is a capability boundary.** A calibration module might get read-only access plus small adjustments; an experiment module gets sequence loading but not limit changes. Which module sits on which route is an operator decision, not the LLM's.
+
+This is the same CPU-plus-FPGA split used by systems like [ARTIQ](https://m-labs.hk/experiment-control/artiq/), with an MCP/WASM layer on top that gives an LLM a constrained, auditable way to operate the instrument.
+
 ## Troubleshooting notes
 
 Hard-won lessons about WAMR on ESP32 (PSRAM setup, string handling, host function signatures, auxiliary stack size) are documented in:
