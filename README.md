@@ -117,9 +117,10 @@ cd mcp_esp32_framework/examples/minimal
 
 ### 3. Build and flash the firmware
 
-Set your WiFi credentials in `main/main.c` (`WIFI_SSID` / `WIFI_PASS`), then:
+Copy `.env.example` to `.env` (gitignored) and set `WIFI_SSID` / `WIFI_PASS`, then:
 
 ```bash
+cp .env.example .env   # then edit
 . $HOME/esp/v5.5/esp-idf/export.sh
 idf.py build flash monitor
 ```
