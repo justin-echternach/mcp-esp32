@@ -1,349 +1,165 @@
-# ESP32 MCP WASM LED Controller
+# mcp-esp32
 
-## 🔥 [CURRENT PLAN - PAY ATTENTION](docs/kickass-demo-plan.md) 🔥
+A **WebAssembly-based [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server for microcontrollers**. It lets an LLM (Claude, ChatGPT, etc.) control a physical device directly — and *what* it can control is defined entirely by the WASM modules you load.
 
-This project implements a **Model Context Protocol (MCP) server** using **WebAssembly (WASM)** modules for LED control on ESP32. It enables LLMs to directly control ESP32 hardware through MCP JSON-RPC 2.0 protocol, with core logic running in sandboxed WASM modules.
+So far it has been built and tested on the **ESP32 (ESP32-WROVER-E with PSRAM)**.
 
-## 🎯 Key Achievement
-Successfully enabled **4MB PSRAM** on ESP32-WROVER-E, expanding from ~180KB to 4MB available memory for WASM operations.
+## The idea
 
-## 🏗️ Architecture
+The firmware is a generic host: WiFi, an HTTP server that speaks MCP (JSON-RPC 2.0), and a WebAssembly runtime ([WAMR](https://github.com/bytecodealliance/wasm-micro-runtime)). It knows nothing about LEDs, speakers, or sensors.
+
+The device's capabilities come from **WASM modules** loaded from the SD card. Each module registers MCP *tools* (name, description, handler). When an LLM calls `tools/list` it sees those tools; when it calls `tools/call`, the request is dispatched into the module, which talks to hardware through a small set of host functions (GPIO, PWM, Bluetooth audio, logging, ...).
+
+Want the LLM to be able to do something new? Write a few C functions, compile to `.was`, drop it on the SD card, and map it to a route. No firmware reflash needed for new tool logic.
+
 ```
-LLM Client (Claude/ChatGPT)
-    ↓ HTTP/JSON-RPC 2.0
-ESP32 HTTP Server (main.c)
-    ↓ Function calls
-WASM Runtime (WAMR)
-    ↓ Host functions
-WASM Module (led_ctrl.was)
-    ↓ GPIO calls
-ESP32 Hardware (LEDs/GPIO)
+LLM client
+   │  HTTP POST /mcp/...   (MCP / JSON-RPC 2.0)
+   ▼
+ESP32 firmware ── HTTP server ── route → WASM module (from SD card)
+                                          │  tools/list, tools/call
+                                          ▼
+                                   WAMR runtime (sandboxed)
+                                          │  host functions
+                                          ▼
+                                   GPIO / PWM / Bluetooth / ...
 ```
 
-## 🚀 Quick Start
+### Why WASM?
 
-### Prerequisites
-- **ESP32-WROVER-E** (with PSRAM)
-- SD card formatted FAT32
-- ESP-IDF v5.5
-- WASI-SDK 20.0
+- **Sandboxed** — modules can only touch hardware through the host functions you expose, and protected GPIO pins are blocked by the host.
+- **Swappable** — change device behavior by replacing a file, not reflashing firmware.
+- **Portable** — the module/SDK side has no ESP32-specific code; the same approach should carry to other MCUs that can run WAMR.
 
-### Build and Flash
+## What's in the repo
+
+```
+main/main.c                    Example app: WiFi + HTTP server + WASM runtime wiring
+mcp_esp32_framework/
+├── host/                      Reusable ESP-IDF host framework
+│   ├── include/, src/         HTTP server, WASM runtime, host functions,
+│                              config loader, pthread pool, sessions, Bluetooth audio
+├── wasm_sdk/                  SDK for writing MCP tools in C (mcp_sdk.h / mcp_sdk.c)
+├── examples/
+│   ├── minimal/               hello / echo / add tools — start here
+│   ├── led_controller/        GPIO LED control
+│   └── music_player/          Melodies & chords over Bluetooth (A2DP) speaker
+└── tools/                     WASM build scripts (WASI-SDK)
+cfg.jsn                        Route → module mapping + GPIO protection (copy to SD card)
+docs/                          Architecture notes and plans
+```
+
+## Writing a tool
+
+A module registers tools at startup and handles calls with plain C:
+
+```c
+#include "mcp_sdk.h"
+
+mcp_result_t add_handler(const char* params) {
+    int32_t a = 0, b = 0;
+    if (mcp_parse_int_param(params, "a", &a) != 0) return mcp_error(-1, "Missing 'a'");
+    if (mcp_parse_int_param(params, "b", &b) != 0) return mcp_error(-1, "Missing 'b'");
+
+    char out[64];
+    snprintf(out, sizeof(out), "%d + %d = %d", a, b, a + b);
+    return mcp_success(out);
+}
+
+void _start() {
+    mcp_server_init("my_module", "1.0.0");
+    // register tools (name, description, handler) — see examples/minimal
+}
+```
+
+Host functions currently exposed to modules include `gpio_set_level`, `gpio_get_level`, `gpio_set_direction`, `gpio_is_pin_protected`, `pwm_*`, SSE event helpers, JSON helpers, and Bluetooth audio playback.
+
+## Getting started
+
+### Requirements
+
+- ESP32 with PSRAM (tested on **ESP32-WROVER-E**; plain ESP32 doesn't have enough RAM for WAMR + MCP)
+- SD card (FAT32) for modules and config
+- [ESP-IDF v5.5](https://docs.espressif.com/projects/esp-idf/)
+- [WASI-SDK](https://github.com/WebAssembly/wasi-sdk/releases) (20.0) for compiling modules
+- WAMR checked out alongside this repo
+
+### 1. Build a WASM module
+
 ```bash
-# Set up environment
+cd mcp_esp32_framework/examples/minimal
+./build.sh            # produces wasm/*.was
+```
+
+### 2. Prepare the SD card
+
+```
+/sdcard/cfg.jsn        # routes + GPIO protection
+/sdcard/wasm/*.was     # your modules
+```
+
+`cfg.jsn` maps HTTP routes to modules:
+
+```json
+{
+  "gpio_protection": {
+    "protected_pins": [0, 1, 6, 7, 8, 9, 10, 11],
+    "input_only_pins": [34, 35, 36, 39],
+    "max_current_pins": [12, 13]
+  },
+  "routes": {
+    "/mcp":       "default.was",
+    "/mcp/led":   "led_ctrl.was",
+    "/mcp/music": "music_p.was"
+  }
+}
+```
+
+### 3. Build and flash the firmware
+
+Set your WiFi credentials in `main/main.c` (`WIFI_SSID` / `WIFI_PASS`), then:
+
+```bash
 . $HOME/esp/v5.5/esp-idf/export.sh
-
-# Build WASM module
-./build_mcp_wasm.sh
-
-# Build ESP32 firmware
-idf.py build
-
-# Flash to device
-idf.py flash
-
-# Monitor logs
-idf.py monitor
+idf.py build flash monitor
 ```
 
-### Test MCP Endpoints
+The device's IP is printed in the serial log.
+
+### 4. Talk to it
+
 ```bash
-# Test tools/list
-curl -X POST http://esp32-ip/mcp \
+curl -X POST http://<esp32-ip>/mcp/led \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
 
-# Test LED control
-curl -X POST http://esp32-ip/mcp \
+curl -X POST http://<esp32-ip>/mcp/led \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"control_led","arguments":{"pin":5,"state":1}},"id":2}'
 ```
 
-## 📁 Project Structure
+Or point any MCP client that supports HTTP transport at the route.
 
-```
-├── main/
-│   ├── main.c                     # ESP32 main application + WAMR integration
-│   └── mcp_pthread_handler.c      # MCP HTTP endpoint handlers
-├── wasm_sdk/
-│   ├── mcp_sdk.h                  # WASM SDK header with MCP interfaces
-│   ├── mcp_sdk.c                  # WASM SDK implementation
-│   └── example_led_controller.c   # Example LED controller WASM module
-├── build_mcp_wasm.sh              # WASM build script (WASI-SDK)
-├── CMakeLists.txt                 # ESP32 build config (includes PSRAM)
-├── sdkconfig.defaults             # ESP32 configuration with PSRAM settings
-├── cfg.jsn                        # WASM module configuration
-└── mcp_config.json                # MCP server configuration + GPIO protection
-```
+Supported MCP methods: `initialize`, `initialized`, `tools/list`, `tools/call`, `ping`.
 
-## 📚 Documentation
+## Status
 
-### Core Documentation
-- **[CLAUDE.md](CLAUDE.md)** - Comprehensive development guide for Claude instances
-- **[wamr-esp32-string-handling.md](wamr-esp32-string-handling.md)** - String handling issues and solutions
-- **[wamr-troubleshooting-guide.md](wamr-troubleshooting-guide.md)** - Major issues resolved and solutions
-- **[docs/mcp_architecture.md](docs/mcp_architecture.md)** - MCP protocol implementation details
+Working on ESP32-WROVER-E:
 
-### Key Topics Covered
-- **Memory Management**: PSRAM configuration, WASM stack/heap sizing
-- **String Handling**: Data section loading, host function signatures  
-- **Stack Issues**: Auxiliary stack overflow resolution
-- **Host Functions**: Function naming, parameter conversion
-- **Build Configuration**: WASI-SDK, memory layout exports
-- **Debugging**: Systematic troubleshooting approaches
+- MCP over HTTP with per-route WASM modules loaded from SD
+- GPIO/LED control with pin protection
+- Bluetooth A2DP speaker output — melodies and chords driven from WASM
 
-## ⚠️ Critical Requirements
+In progress: refactoring `mcp_esp32_framework` into a clean drop-in ESP-IDF component, reducing audio popping, and testing on other boards.
 
-### Hardware
-- **ESP32-WROVER-E required** - ESP32 without PSRAM has insufficient memory
+## Troubleshooting notes
 
-### Memory Configuration
-```c
-// PSRAM must be enabled in sdkconfig.defaults
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_USE_MALLOC=y
-// ... (see sdkconfig.defaults for complete config)
-```
+Hard-won lessons about WAMR on ESP32 (PSRAM setup, string handling, host function signatures, auxiliary stack size) are documented in:
 
-### WASM Stack Size
-```bash
-# Critical: 32KB stack required for MCP operations
--z stack-size=32768    # In build script
-stack_size = 32 * 1024 # In runtime
-```
+- [wamr-troubleshooting-guide.md](wamr-troubleshooting-guide.md)
+- [wamr-esp32-string-handling.md](wamr-esp32-string-handling.md)
+- [docs/mcp_architecture.md](docs/mcp_architecture.md)
 
-## 🔧 Available MCP Tools
+## Security
 
-1. **control_led** - Set LED state (pin, state)
-2. **get_led_status** - Read current LED state (pin)  
-3. **toggle_led** - Toggle LED state (pin)
-4. **get_system_info** - ESP32 system information
-
-## 🛡️ GPIO Protection
-
-GPIO protection prevents access to critical system pins via `mcp_config.json`:
-- **Protected pins**: 0,1,2,3,6,7,8,9,10,11 (system critical)
-- **Input-only pins**: 34,35,36,37,38,39 (ADC pins)
-- **Current-limited pins**: 12,13,14,15 (high current risk)
-
-## 🚨 Known Issues and Solutions
-
-### Major Issues Resolved
-1. ✅ **String loading corruption** - Fixed with memory layout exports
-2. ✅ **Host function name collisions** - Fixed with function renaming  
-3. ✅ **Auxiliary stack overflow** - Fixed with 32KB stack size
-
-See **[wamr-troubleshooting-guide.md](wamr-troubleshooting-guide.md)** for complete details.
-
-### Current Status
-- ✅ PSRAM enabled (4MB available)
-- ✅ WASM compilation and loading
-- ✅ Host function calls working
-- ✅ MCP protocol implementation  
-- ✅ String handling resolved
-- ✅ Stack overflow resolved
-- 🔧 Buffer management optimization in progress
-
-## 🧪 Testing
-
-### Unit Tests
-```bash
-./build_mcp_wasm.sh    # Build WASM
-idf.py build           # Build firmware
-```
-
-### Integration Tests
-```bash
-./test_mcp_now.sh      # Test MCP endpoints
-```
-
-## 🤝 Development Notes
-
-**For future development**, see **[CLAUDE.md](CLAUDE.md)** which contains:
-- Complete development guide
-- Critical debugging techniques  
-- Memory configuration details
-- Host function best practices
-- Common build issues and solutions
-
-## 📄 License
-
-This project demonstrates ESP32 WASM integration for educational and research purposes.
-
----
-
-*Successfully implements MCP-over-WASM architecture for ESP32 hardware control after resolving critical WAMR runtime issues.*
-
-
-Current Refactor Tasks ...
-
- I definitely want to use the PAM8403.  The first thing we need to do is clean up the current project, so I can 
-  basically use it as a framework for other projects.  The wasm part needs a little cleanup but main/main.c and the 
-  associated file will need to be refactored so that when i create a new ESP-IDF project I can just include what is 
-  needed for the http server, mcp, host functions etc.  Don't change anything yet.  Just analyze what needs to be done.
-
-● Excellent idea to refactor into a reusable framework! Let me analyze what needs to be done to clean up the codebase:
-
-  Current Structure Analysis
-
-  main/main.c (3000+ lines - way too monolithic!)
-
-  Currently contains:
-  1. WiFi setup (lines ~1150-1230)
-  2. HTTP server (lines ~480-1140)
-  3. WAMR initialization (lines ~2075-2330)
-  4. Host functions (lines ~1234-1820)
-  5. MCP config loading (lines ~160-440)
-  6. GPIO/Hardware specific (lines ~2095-2110)
-  7. WASM module management (lines ~590-900)
-  8. SD card mounting (lines ~1900-2050)
-  9. App main + pthread setup (lines ~2340-2400)
-
-  What Needs Refactoring
-
-  1. Core MCP Framework (reusable)
-
-  mcp_framework/
-  ├── include/
-  │   ├── mcp_server.h          # MCP server interface
-  │   ├── mcp_wasm_runtime.h    # WAMR wrapper
-  │   ├── mcp_host_functions.h  # Host function registry
-  │   └── mcp_config.h          # Config structures
-  ├── src/
-  │   ├── mcp_server.c          # HTTP server + MCP endpoints
-  │   ├── mcp_wasm_runtime.c    # WAMR init/management
-  │   ├── mcp_host_registry.c   # Core host functions
-  │   └── mcp_config_loader.c   # JSON config parsing
-  └── CMakeLists.txt
-
-  2. Project-Specific Implementation
-
-  main/
-  ├── main.c                     # Just app_main + project setup
-  ├── project_host_functions.c   # LED, GPIO, speaker functions
-  ├── hardware_init.c            # GPIO setup, peripherals
-  └── CMakeLists.txt
-
-  Specific Refactoring Tasks
-
-  A. Extract Core Components
-
-  1. MCP Server Module
-    - HTTP server setup
-    - MCP route handling
-    - CORS support
-    - Request/response processing
-  2. WASM Runtime Module
-    - WAMR initialization
-    - Module loading/unloading
-    - Execution environment management
-    - Memory configuration
-  3. Host Function Registry
-    - Core functions (malloc, string ops, logging)
-    - Registration mechanism
-    - Type signature handling
-  4. Configuration System
-    - JSON parsing
-    - Route mapping
-    - GPIO protection rules
-
-  B. Define Clean Interfaces
-
-  // mcp_server.h
-  typedef struct {
-      char* wifi_ssid;
-      char* wifi_pass;
-      int port;
-      mcp_route_t* routes;
-      int route_count;
-  } mcp_server_config_t;
-
-  esp_err_t mcp_server_init(mcp_server_config_t* config);
-  esp_err_t mcp_server_start(void);
-  esp_err_t mcp_server_register_host_functions(host_function_t* funcs, int count);
-
-  C. Separate Concerns
-
-  Remove from Core:
-  - LED blink loop (project-specific)
-  - GPIO pin definitions
-  - Hardware-specific initialization
-  - Test/debug code
-
-  Keep in Core:
-  - HTTP server infrastructure
-  - WASM runtime management
-  - MCP protocol handling
-  - Core host functions (memory, strings, logging)
-
-  D. Make Hardware Agnostic
-
-  Current code has hardcoded:
-  - LED_GPIO GPIO_NUM_5
-  - SD card pins
-  - LED state management
-
-  Should be:
-  - Configuration-driven
-  - Optional modules
-  - Hardware abstraction layer
-
-  Cleanup Tasks
-
-  1. Remove Dead Code
-    - SSE implementation (currently disabled)
-    - Legacy LED control functions
-    - Duplicate error handling
-  2. Consolidate Headers
-    - Too many includes
-    - Create proper header organization
-    - Forward declarations
-  3. Fix Threading Model
-    - Clear separation of pthread vs main thread
-    - Document thread safety requirements
-    - Proper mutex usage
-  4. Improve Error Handling
-    - Consistent error codes
-    - Better error propagation
-    - Cleanup on failure paths
-  5. Memory Management
-    - Clear ownership rules
-    - Consistent allocation strategy
-    - PSRAM vs regular RAM usage
-
-  Benefits After Refactoring
-
-  1. New Project Setup:
-  // main.c for new project
-  #include "mcp_framework.h"
-  #include "my_hardware.h"
-
-  void app_main() {
-      // Initialize hardware
-      my_hardware_init();
-
-      // Setup MCP server
-      mcp_server_config_t config = {
-          .wifi_ssid = "MySSID",
-          .wifi_pass = "MyPass",
-          .port = 80
-      };
-
-      // Register project-specific host functions
-      mcp_server_register_host_functions(my_host_functions, count);
-
-      // Start server
-      mcp_server_init(&config);
-      mcp_server_start();
-  }
-
-  2. Modular WASM Modules
-    - Drop in new .was files
-    - Auto-discovery from SD card
-    - No recompilation needed
-  3. Easy Hardware Changes
-    - Just implement new host functions
-    - No core framework changes
-    - Clean abstraction
-
-  This refactoring will make your RGB LED + Music demo much cleaner to implement!
+This is a hobby/research project. The HTTP endpoints have **no authentication** — anyone on your network can call the tools. Don't expose it to untrusted networks without adding auth.
