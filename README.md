@@ -45,9 +45,9 @@ The proof of concept has been validated end to end on real hardware: an LLM conn
 
 ### LED control
 
-<a href="docs/media/led-demo-lmstudio.mp4"><img src="docs/images/led-demo-poster.jpg" width="240" align="right" alt="Video: LM Studio + gpt-oss-20b blinking an LED on the ESP32 over MCP"></a>
+<a href="https://x.com/JustinEchterna9/status/1953216880367288817"><img src="docs/media/led-demo-lmstudio.gif" width="280" align="right" alt="Video: LM Studio + gpt-oss-20b blinking an LED on the ESP32 over MCP"></a>
 
-**▶ [Watch the video](docs/media/led-demo-lmstudio.mp4)** (25s, also on [X](https://x.com/JustinEchterna9/status/1953216880367288817)): [LM Studio](https://lmstudio.ai) running the open-weight `openai/gpt-oss-20b` model locally, connected to the ESP32 as an MCP server. Asked to *"turn the led on gpio 5 on and off five times"*, the model issues ten `control_led` tool calls and the LED on the breadboard blinks in step. No cloud LLM involved.
+**▶ Demo** (25s; [full-quality video on X](https://x.com/JustinEchterna9/status/1953216880367288817), or [download the .mp4](docs/media/led-demo-lmstudio.mp4?raw=true)): [LM Studio](https://lmstudio.ai) running the open-weight `openai/gpt-oss-20b` model locally, connected to the ESP32 as an MCP server. Asked to *"turn the led on gpio 5 on and off five times"*, the model issues ten `control_led` tool calls and the LED on the breadboard blinks in step. No cloud LLM involved.
 
 The `led_controller` module exposes `control_led`, `toggle_led`, `get_led_status` and `get_system_info`. The LLM decides which pins to switch and when; the host refuses any pin listed as protected in `cfg.jsn`.
 
