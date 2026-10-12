@@ -13,12 +13,14 @@ static const char *TAG = "mcp-pthread";
 // Global pthread pool instance
 static mcp_pthread_pool_t g_pool = {0};
 
-static int32_t resp_buffer_size = 2048;
+// Largest request body accepted, and the size of the reply buffer a module writes into
+#define MCP_MAX_REQUEST_BODY (16 * 1024)
+#define MCP_RESPONSE_BUFFER_SIZE (8 * 1024)
 // External references are now declared in the header file
 
 // Forward declarations
 static void *mcp_worker_thread(void *arg);
-static esp_err_t process_mcp_request(mcp_request_t *req);
+static void process_mcp_request(mcp_request_t *req);
 
 esp_err_t mcp_pthread_pool_init(int pool_size)
 {
@@ -30,7 +32,11 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
 
     ESP_LOGI(TAG, "Initializing MCP pthread pool with %d workers", pool_size);
 
-    g_pool.pool_size = pool_size;
+    if (pool_size < 1)
+    {
+        pool_size = 1;
+    }
+    g_pool.pool_size = 0; // counts workers actually started
     g_pool.shutdown = false;
 
     // Create FreeRTOS queue for requests (queue size = pool_size * 2)
@@ -53,29 +59,45 @@ esp_err_t mcp_pthread_pool_init(int pool_size)
     // Create worker pthreads with larger stack size
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, 16384); // 32KB stack 32768
-
-    // Currently with a 32KB stack the ESP32-WROVER-E supports 2 worker threads
+    pthread_attr_setstacksize(&attr, 16384); // 16KB per worker
 
     for (int i = 0; i < pool_size; i++)
     {
         int *worker_id = mcp_malloc(sizeof(int));
+        if (!worker_id)
+        {
+            ESP_LOGE(TAG, "Failed to allocate worker id %d", i);
+            break;
+        }
         *worker_id = i;
 
         int ret = pthread_create(&g_pool.workers[i], &attr, mcp_worker_thread, worker_id);
         if (ret != 0)
         {
             ESP_LOGE(TAG, "Failed to create worker thread %d: %d", i, ret);
-            g_pool.shutdown = true;
-            mcp_pthread_pool_shutdown();
-            pthread_attr_destroy(&attr);
-            return ESP_FAIL;
+            mcp_free(worker_id);
+            break;
         }
+        g_pool.pool_size = i + 1;
 
         ESP_LOGD(TAG, "Created worker pthread %d", i);
     }
 
     pthread_attr_destroy(&attr);
+
+    if (g_pool.pool_size == 0)
+    {
+        ESP_LOGE(TAG, "No worker threads could be started");
+        mcp_free(g_pool.workers);
+        g_pool.workers = NULL;
+        vQueueDelete(g_pool.request_queue);
+        g_pool.request_queue = NULL;
+        return ESP_FAIL;
+    }
+    if (g_pool.pool_size < pool_size)
+    {
+        ESP_LOGW(TAG, "Started %d of %d worker threads", g_pool.pool_size, pool_size);
+    }
 
     g_pool.initialized = true;
     ESP_LOGI(TAG, "✅ MCP pthread pool initialized successfully");
@@ -98,7 +120,7 @@ esp_err_t mcp_pthread_pool_shutdown(void)
     for (int i = 0; i < g_pool.pool_size; i++)
     {
         mcp_request_t *shutdown_req = NULL;
-        xQueueSend(g_pool.request_queue, &shutdown_req, 0);
+        xQueueSend(g_pool.request_queue, &shutdown_req, pdMS_TO_TICKS(1000));
     }
 
     // Wait for all workers to finish
@@ -127,6 +149,163 @@ esp_err_t mcp_pthread_pool_shutdown(void)
     g_pool.initialized = false;
     ESP_LOGI(TAG, "MCP pthread pool shutdown complete");
     return ESP_OK;
+}
+
+// Free a request and everything it owns. Does not touch http_req.
+static void mcp_request_free(mcp_request_t *req)
+{
+    if (!req)
+        return;
+    mcp_free(req->response);
+    mcp_free(req->request_body);
+    mcp_free(req->uri);
+    mcp_free(req->headers);
+    mcp_free(req->response_headers);
+    mcp_free(req);
+}
+
+// Copy the JSON-RPC id token (number or string) from the request so host-generated
+// errors answer the right request. Falls back to null.
+static void extract_request_id(const char *body, char *out, size_t out_size)
+{
+    snprintf(out, out_size, "null");
+    const char *p = body ? strstr(body, "\"id\"") : NULL;
+    if (!p)
+        return;
+    p += 4;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+    if (*p++ != ':')
+        return;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+        p++;
+
+    const char *end = p;
+    if (*p == '"')
+    {
+        end = p + 1;
+        while (*end && *end != '"')
+        {
+            if (*end == '\\' && end[1])
+                end++;
+            end++;
+        }
+        if (*end != '"')
+            return;
+        end++;
+    }
+    else
+    {
+        while (*end == '-' || (*end >= '0' && *end <= '9'))
+            end++;
+    }
+
+    size_t len = end - p;
+    if (len > 0 && len < out_size)
+    {
+        memcpy(out, p, len);
+        out[len] = '\0';
+    }
+}
+
+// Fill req->response with a JSON-RPC error that echoes the request's id.
+// message must be a JSON-safe literal.
+static void set_error_response(mcp_request_t *req, int code, const char *message)
+{
+    char id[64];
+    extract_request_id(req->request_body, id, sizeof(id));
+    snprintf(req->response, req->response_size,
+             "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%s}",
+             code, message, id);
+}
+
+// Send req->response (plus any headers the module set) on the async request,
+// then complete it. Runs on the worker thread.
+static void send_mcp_response(mcp_request_t *mcp_req)
+{
+    httpd_req_t *req = mcp_req->http_req;
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
+
+    // Apply response headers set by WASM module. httpd_resp_set_hdr stores
+    // pointers, so the copies stay allocated until the response is sent.
+#define MAX_RESPONSE_HEADERS 10
+    char *header_buffers[MAX_RESPONSE_HEADERS * 2] = {0}; // name,value pairs
+    int header_buffer_count = 0;
+
+    if (mcp_req->response_headers && mcp_req->response_headers_length > 0)
+    {
+        ESP_LOGI(TAG, "Applying response headers: %s", mcp_req->response_headers);
+
+        const char *pos = mcp_req->response_headers;
+        while (*pos && header_buffer_count < MAX_RESPONSE_HEADERS * 2)
+        {
+            const char *colon = strchr(pos, ':');
+            const char *line_end = strstr(pos, "\r\n");
+            if (!colon || !line_end || colon > line_end)
+                break;
+
+            size_t name_len = colon - pos;
+            const char *value = colon + 1;
+            while (*value == ' ' || *value == '\t')
+                value++;
+            size_t value_len = line_end - value;
+
+            if (name_len > 0 && name_len < 128 && value_len < 256)
+            {
+                char *header_name = mcp_malloc(name_len + 1);
+                char *header_value = mcp_malloc(value_len + 1);
+                if (!header_name || !header_value)
+                {
+                    mcp_free(header_name);
+                    mcp_free(header_value);
+                    ESP_LOGE(TAG, "Failed to allocate response header");
+                    break;
+                }
+                memcpy(header_name, pos, name_len);
+                header_name[name_len] = '\0';
+                memcpy(header_value, value, value_len);
+                header_value[value_len] = '\0';
+                header_buffers[header_buffer_count++] = header_name;
+                header_buffers[header_buffer_count++] = header_value;
+
+                httpd_resp_set_hdr(req, header_name, header_value);
+                ESP_LOGI(TAG, "Applied header: %s = %s", header_name, header_value);
+            }
+
+            pos = line_end + 2;
+        }
+    }
+
+    esp_err_t result;
+    size_t len = strlen(mcp_req->response);
+    if (len == 0)
+    {
+        // JSON-RPC notification: no response body (MCP Streamable HTTP expects 202)
+        httpd_resp_set_status(req, "202 Accepted");
+        result = httpd_resp_send(req, NULL, 0);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Sending MCP response: %s", mcp_req->response);
+        result = httpd_resp_send(req, mcp_req->response, len);
+    }
+
+    if (result != ESP_OK)
+    {
+        ESP_LOGW(TAG, "Failed to send MCP response: %s", esp_err_to_name(result));
+    }
+
+    for (int i = 0; i < header_buffer_count; i++)
+    {
+        mcp_free(header_buffers[i]);
+    }
+
+    httpd_req_async_handler_complete(req);
+    mcp_req->http_req = NULL;
 }
 
 static void *mcp_worker_thread(void *arg)
@@ -160,14 +339,11 @@ static void *mcp_worker_thread(void *arg)
 
             ESP_LOGD(TAG, "Worker %d processing MCP request to %s", worker_id, req->uri);
 
-            // Process the MCP request in pthread context
-            req->result = process_mcp_request(req);
-
-            // Signal completion to HTTP handler
-            pthread_mutex_lock(&req->completion_mutex);
-            req->completed = true;
-            pthread_cond_signal(&req->completion_cond);
-            pthread_mutex_unlock(&req->completion_mutex);
+            // Process the MCP request in pthread context, reply, and release it.
+            // The worker owns the request from here on.
+            process_mcp_request(req);
+            send_mcp_response(req);
+            mcp_request_free(req);
 
             ESP_LOGD(TAG, "Worker %d completed request", worker_id);
         }
@@ -182,7 +358,10 @@ static void *mcp_worker_thread(void *arg)
     return NULL;
 }
 
-static esp_err_t process_mcp_request(mcp_request_t *req)
+// Runs the request through the route's WASM module and leaves the reply (or a
+// JSON-RPC error) in req->response. Every exit path releases the module mutex,
+// frees WASM buffers and clears the per-thread request/session context.
+static void process_mcp_request(mcp_request_t *req)
 {
     ESP_LOGI(TAG, "Processing MCP request to %s: %s", req->uri, req->request_body);
 
@@ -200,30 +379,28 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
         ESP_LOGW(TAG, "No session ID found in request");
     }
 
+    // Route matching ignores any query string (e.g. ?session_id=...)
+    char route[128];
+    snprintf(route, sizeof(route), "%.*s", (int)strcspn(req->uri, "?"), req->uri);
+
     // Find WASM module for this route
-    const char *wasm_filename = mcp_wasm_find_file_for_route(req->uri);
+    const char *wasm_filename = mcp_wasm_find_file_for_route(route);
     if (!wasm_filename)
     {
-        ESP_LOGW(TAG, "No WASM module configured for route: %s", req->uri);
-        snprintf(req->response, resp_buffer_size,
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Route not configured\"},\"id\":1}");
+        ESP_LOGW(TAG, "No WASM module configured for route: %s", route);
+        set_error_response(req, -32601, "Route not configured");
         mcp_session_clear_current();
-        return ESP_FAIL;
+        return;
     }
 
-    // Load MCP WASM into the existing main thread runtime (no separate runtime)
-    ESP_LOGI(TAG, "🔧 Loading MCP WASM into main thread runtime from pthread context");
-    ESP_LOGI(TAG, "🔍 DEBUG: Current thread ID: %p", (void *)pthread_self());
-
     // Load WASM module into main thread runtime
-    mcp_wasm_module_t *module = mcp_wasm_load_module_for_route(req->uri, wasm_filename);
+    mcp_wasm_module_t *module = mcp_wasm_load_module_for_route(route, wasm_filename);
     if (!module)
     {
-        ESP_LOGE(TAG, "Failed to load WASM module for route: %s", req->uri);
-        snprintf(req->response, resp_buffer_size,
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Failed to load WASM module\"},\"id\":1}");
+        ESP_LOGE(TAG, "Failed to load WASM module for route: %s", route);
+        set_error_response(req, -32603, "Failed to load WASM module");
         mcp_session_clear_current();
-        return ESP_FAIL;
+        return;
     }
 
     mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
@@ -232,9 +409,15 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
              module, module->wasm_module, module->wasm_module_inst);
     ESP_LOGI(TAG, "🔍 DEBUG: Module has exec_env: %p", module->exec_env);
 
-    // Look for MCP request handler function with retry mechanism for timing issues
-    ESP_LOGI(TAG, "🔍 DEBUG: About to lookup function in pthread context");
     pthread_mutex_lock(&module->module_mutex);
+
+    uint64_t request_wasm_buffer = 0;
+    uint64_t response_wasm_buffer = 0;
+    void *request_native_ptr = NULL;
+    void *response_native_ptr = NULL;
+    const size_t response_size = MCP_RESPONSE_BUFFER_SIZE;
+
+    // Look for MCP request handler function with retry mechanism for timing issues
     wasm_function_inst_t handle_request_func = NULL;
     int retry_count = 0;
     const int max_retries = 5;
@@ -250,7 +433,7 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
             if (retry_count < max_retries)
             {
                 ESP_LOGW(TAG, "🔍 DEBUG: Function lookup failed, retrying in 10ms (attempt %d/%d)", retry_count, max_retries);
-                vTaskDelay(pdMS_TO_TICKS(10)); // Wait 10ms before retry
+                vTaskDelay(pdMS_TO_TICKS(10));
             }
         }
     }
@@ -258,189 +441,158 @@ static esp_err_t process_mcp_request(mcp_request_t *req)
     if (!handle_request_func)
     {
         ESP_LOGE(TAG, "WASM module %s missing handle_mcp_request function after %d retries", wasm_filename, max_retries);
-        ESP_LOGE(TAG, "🔍 DEBUG: Lookup failed - module_inst still: %p", module->wasm_module_inst);
-        snprintf(req->response, resp_buffer_size,
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"Invalid WASM module\"},\"id\":1}");
-        mcp_session_clear_current();
-        pthread_mutex_unlock(&module->module_mutex);
-        return ESP_FAIL;
+        set_error_response(req, -32603, "Invalid WASM module");
+        goto unlock;
     }
 
-    // Allocate WASM memory with manual offsets to stay within 64KB limit
-    void *request_native_ptr;
-    void *response_native_ptr;
-
-    // Use fixed offsets within the first 64KB of WASM memory
-    // uint64_t request_wasm_buffer = 32768;;  // Start at 1KB offset
-    // uint64_t response_wasm_buffer = 40960; // Start at 2KB offset
-    size_t response_size = 2048; // Small response buffer
     ESP_LOGI(TAG, "🔍 DEBUG: Request length: %d", req->request_len);
-    uint64_t request_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, req->request_len + 1, &request_native_ptr);
-    uint64_t response_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, response_size, &response_native_ptr);
+    request_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, req->request_len + 1, &request_native_ptr);
+    response_wasm_buffer = wasm_runtime_module_malloc(module->wasm_module_inst, response_size, &response_native_ptr);
 
-    if (request_wasm_buffer == 0 || response_wasm_buffer == 0)
+    if (request_wasm_buffer == 0 || response_wasm_buffer == 0 || !request_native_ptr || !response_native_ptr)
     {
-        ESP_LOGE(TAG, "Failed to allocate WASM memory");
-        return ESP_FAIL;
-    }
-
-    // Get native pointers from WASM offsets
-    // request_native_ptr = (char *)wasm_runtime_addr_app_to_native(module->wasm_module_inst, request_wasm_buffer);
-    // response_native_ptr = (char *)wasm_runtime_addr_app_to_native(module->wasm_module_inst, response_wasm_buffer);
-
-    // Validate we got valid pointers
-    if (!request_native_ptr || !response_native_ptr)
-    {
-        ESP_LOGE(TAG, "Failed to get WASM memory pointers");
-        snprintf(req->response, resp_buffer_size,
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM memory mapping failed\"},\"id\":1}");
-        mcp_session_clear_current();
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Failed to allocate WASM memory (request %u bytes, response %u bytes)",
+                 (unsigned)(req->request_len + 1), (unsigned)response_size);
+        set_error_response(req, -32603, "WASM module out of memory");
+        goto unlock;
     }
 
     ESP_LOGI(TAG, "🔍 DEBUG: Allocated WASM memory - request_buffer: %llu, response_buffer: %llu", request_wasm_buffer, response_wasm_buffer);
-    ESP_LOGI(TAG, "🔍 DEBUG: Native pointers - request_native_ptr: %p, response_native_ptr: %p", request_native_ptr, response_native_ptr);
 
-    // Copy request to WASM memory (using native pointers directly)
-    strcpy(request_native_ptr, req->request_body);
-    // Clear response buffer
+    // Copy request to WASM memory and clear the response buffer
+    memcpy(request_native_ptr, req->request_body, req->request_len + 1);
     memset(response_native_ptr, 0, response_size);
 
-    // Call WASM function exactly like basic sample: handle_mcp_request(request, response, max_len)
+    // Call WASM function: handle_mcp_request(request, response, max_len)
     uint32_t argv[3] = {(uint32_t)request_wasm_buffer, (uint32_t)response_wasm_buffer, response_size};
-
-    // ESP_LOGI(TAG, "🔍 DEBUG: About to call WASM function with argv: [%u, %u, %u]", argv[0], argv[1], argv[2]);
-    // ESP_LOGI(TAG, "🔍 DEBUG: Request body in WASM memory: '%.100s'", request_native_ptr);
-    // ESP_LOGI(TAG, "🔍 DEBUG: WASM memory bounds: request ends at %u, response ends at %u, module has 65536 bytes",
-    //          (uint32_t)(request_wasm_buffer + req->request_len + 1), (uint32_t)(response_wasm_buffer + response_size));
 
     // Set request context for host functions
     mcp_host_set_request_context(req);
-
-    // Clear any previous exceptions
     wasm_runtime_clear_exception(module->wasm_module_inst);
 
     bool call_success = wasm_runtime_call_wasm(module->exec_env, handle_request_func, 3, argv);
 
+    mcp_host_clear_request_context();
+
     int32_t wasm_return_value = (int32_t)argv[0];
-    ESP_LOGI(TAG, "🔍 DEBUG: WASM call returned value: %d", wasm_return_value);
-
-    uint64_t app_start_offset = 0, app_end_offset = 0;
-
-    //mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
-
-    // bool success = wasm_runtime_get_app_addr_range(module->wasm_module_inst, 0, &app_start_offset, &app_end_offset);
-    // ESP_LOGI(TAG, "WASM memory range: success=%d, start=%llu, end=%llu, size=%llu",
-    //          success, app_start_offset, app_end_offset, app_end_offset - app_start_offset);
-    // Clear request context after WASM execution
-    
-
-    ESP_LOGI(TAG, "🔍 DEBUG: WASM call result: %s", call_success ? "SUCCESS" : "FAILED");
-
-    // Get detailed exception info immediately
-    const char *exception = wasm_runtime_get_exception(module->wasm_module_inst);
-    if (exception)
-    {
-        ESP_LOGE(TAG, "🔍 DEBUG: Detailed exception: %s", exception);
-    }
-
-    // Copy response from WASM memory (using native pointer directly)
-    // Ensure we don't overflow the response buffer
-    int32_t response_len = 2048;
-    ESP_LOGI(TAG, "🔍 DEBUG: Response size: %d", response_len);
-    // strncpy(req->response, response_native_ptr, response_len - 1);
-    // req->response[response_len - 1] = '\0';
-
-
-    snprintf(req->response, response_len, "%s", (char *)response_native_ptr);
+    ESP_LOGI(TAG, "🔍 DEBUG: WASM call result: %s, returned %ld", call_success ? "SUCCESS" : "FAILED", (long)wasm_return_value);
 
     // this is here for debugging wasm func export table corruption after response is written to
     mcp_wasm_dump_exports(module->wasm_module, wasm_filename);
-
     mcp_memory_stats();
-
-    wasm_runtime_module_free(module->wasm_module_inst, request_wasm_buffer);
-    wasm_runtime_module_free(module->wasm_module_inst, response_wasm_buffer);
-
-    pthread_mutex_unlock(&module->module_mutex);
-    //  No need to free WASM memory - using fixed offsets
 
     if (!call_success)
     {
         const char *exception = wasm_runtime_get_exception(module->wasm_module_inst);
         ESP_LOGE(TAG, "WASM MCP handler failed: %s", exception ? exception : "Unknown error");
-        snprintf(req->response, resp_buffer_size,
-                 "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-1,\"message\":\"WASM handler failed\"},\"id\":1}");
-        mcp_session_clear_current();
-        // mcp_host_clear_request_context();  // DEBUGGING: Commenting out to test if this breaks function lookup
-        return ESP_FAIL;
+        set_error_response(req, -32603, "WASM handler failed");
+        goto unlock;
     }
 
-    ESP_LOGI(TAG, "✅ MCP request processed successfully in main thread runtime: %s", req->response);
+    // The module is not trusted to NUL-terminate inside its buffer
+    ((char *)response_native_ptr)[response_size - 1] = '\0';
 
-    mcp_host_clear_request_context(); // DEBUGGING: Commenting out to test if this breaks function lookup
-    // Clear session context for this thread
+    if (wasm_return_value == -2)
+    {
+        // SDK convention: the reply did not fit in max_len
+        ESP_LOGE(TAG, "WASM response truncated (buffer %u bytes)", (unsigned)response_size);
+        set_error_response(req, -32603, "Response too large");
+        goto unlock;
+    }
+
+    snprintf(req->response, req->response_size, "%s", (char *)response_native_ptr);
+    ESP_LOGI(TAG, "✅ MCP request processed successfully: %s", req->response);
+
+unlock:
+    if (request_wasm_buffer)
+        wasm_runtime_module_free(module->wasm_module_inst, request_wasm_buffer);
+    if (response_wasm_buffer)
+        wasm_runtime_module_free(module->wasm_module_inst, response_wasm_buffer);
+    pthread_mutex_unlock(&module->module_mutex);
     mcp_session_clear_current();
-
-    return ESP_OK;
 }
 
+// Send a JSON-RPC style error straight from the HTTP task (before a worker owns the request)
+static esp_err_t send_http_error(httpd_req_t *req, const char *status, int code, const char *message)
+{
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":null}", code, message);
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
+}
+
+// HTTP task: read the request, hand it to a worker, and return immediately.
+// The worker replies on an async copy of the request (see send_mcp_response).
 esp_err_t mcp_pthread_handler(httpd_req_t *req)
 {
     if (!g_pool.initialized)
     {
         ESP_LOGE(TAG, "MCP pthread pool not initialized");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Service unavailable");
-        return ESP_FAIL;
+        return send_http_error(req, "503 Service Unavailable", -32603, "Service unavailable");
     }
 
-    // Read request body
-    char *content = mcp_malloc(req->content_len + 1);
-    if (!content)
+    if (req->content_len == 0)
     {
-        ESP_LOGE(TAG, "Failed to allocate request buffer");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
-        return ESP_FAIL;
+        return send_http_error(req, "400 Bad Request", -32700, "Empty request body");
     }
-
-    int ret = httpd_req_recv(req, content, req->content_len);
-    if (ret <= 0)
+    if (req->content_len > MCP_MAX_REQUEST_BODY)
     {
-        ESP_LOGE(TAG, "Failed to receive request body");
-        mcp_free(content);
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Failed to read request");
-        return ESP_FAIL;
+        ESP_LOGW(TAG, "Rejecting %u byte request (limit %d)", (unsigned)req->content_len, MCP_MAX_REQUEST_BODY);
+        return send_http_error(req, "413 Content Too Large", -32600, "Request too large");
     }
-    content[ret] = '\0';
 
-    // Create MCP request structure
-    //mcp_request_t *mcp_req = heap_caps_malloc(sizeof(mcp_request_t), MALLOC_CAP_SPIRAM);
-    mcp_request_t *mcp_req = mcp_malloc(sizeof(mcp_request_t));
-
+    mcp_request_t *mcp_req = mcp_calloc(1, sizeof(mcp_request_t));
     if (!mcp_req)
     {
-        ESP_LOGE(TAG, "Failed to allocate MCP request");
-        mcp_free(content);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
-        return ESP_FAIL;
+        return send_http_error(req, "500 Internal Server Error", -32603, "Memory allocation failed");
     }
 
-    //mcp_req->response = heap_caps_malloc(resp_buffer_size, MALLOC_CAP_SPIRAM);
-    mcp_req->response = mcp_malloc(resp_buffer_size);
+    mcp_req->request_body = mcp_malloc(req->content_len + 1);
+    mcp_req->response_size = MCP_RESPONSE_BUFFER_SIZE;
+    mcp_req->response = mcp_malloc(mcp_req->response_size);
+
+    size_t uri_len = strlen(req->uri);
+    mcp_req->uri = mcp_malloc(uri_len + 1);
+
+    if (!mcp_req->request_body || !mcp_req->response || !mcp_req->uri)
+    {
+        mcp_request_free(mcp_req);
+        return send_http_error(req, "500 Internal Server Error", -32603, "Memory allocation failed");
+    }
+    memcpy(mcp_req->uri, req->uri, uri_len);
+    mcp_req->uri[uri_len] = '\0';
+    mcp_req->response[0] = '\0';
+
+    // Read the whole body - it can arrive over several TCP segments
+    size_t received = 0;
+    int timeouts = 0;
+    while (received < req->content_len)
+    {
+        int ret = httpd_req_recv(req, mcp_req->request_body + received, req->content_len - received);
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT && ++timeouts < 3)
+        {
+            continue;
+        }
+        if (ret <= 0)
+        {
+            ESP_LOGE(TAG, "Failed to receive request body (%u/%u bytes)", (unsigned)received, (unsigned)req->content_len);
+            mcp_request_free(mcp_req);
+            return send_http_error(req, "400 Bad Request", -32700, "Failed to read request");
+        }
+        received += ret;
+    }
+    mcp_req->request_body[received] = '\0';
+    mcp_req->request_len = received;
 
     // Extract important headers for WASM access (limited set for security/size)
-    int32_t header_buffer_size = 1024;
-    char *header_buffer = mcp_malloc(header_buffer_size);
-    if (!header_buffer) {
-        // Handle allocation failure
-        mcp_free(content);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
-        return ESP_FAIL;
-    }
-    memset(header_buffer, 0, header_buffer_size);
+    char header_buffer[1024];
+    char header_value[256];
     size_t header_len = 0;
+    header_buffer[0] = '\0';
 
-    // List of headers to extract (case will be preserved from ESP-IDF)
     const char *important_headers[] = {
         "MCP-Session-ID", // MCP session management
         "Mcp-Session-Id", // MCP spec format
@@ -450,233 +602,45 @@ esp_err_t mcp_pthread_handler(httpd_req_t *req)
         "X-Request-ID",   // Request tracing
         NULL};
 
-    for (int i = 0; important_headers[i] != NULL && header_len < header_buffer_size - 100; i++)
+    for (int i = 0; important_headers[i] != NULL && header_len < sizeof(header_buffer) - 100; i++)
     {
-        char *header_value = mcp_malloc(256);
-        if (!header_value) {
-            ESP_LOGE(TAG, "Failed to allocate header_value buffer");
-            mcp_free(header_buffer);
-            mcp_free(content);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory allocation failed");
-            return ESP_FAIL;
-        }
-        
-        if (httpd_req_get_hdr_value_str(req, important_headers[i], header_value, 256) == ESP_OK)
+        if (httpd_req_get_hdr_value_str(req, important_headers[i], header_value, sizeof(header_value)) == ESP_OK)
         {
-            int added = snprintf(header_buffer + header_len, header_buffer_size - header_len,
+            int added = snprintf(header_buffer + header_len, sizeof(header_buffer) - header_len,
                                  "%s: %s\r\n", important_headers[i], header_value);
-            if (added > 0 && header_len + added < header_buffer_size)
+            if (added > 0 && header_len + added < sizeof(header_buffer))
             {
                 header_len += added;
             }
         }
-        mcp_free(header_value);
     }
 
-    // Initialize request structure
-    mcp_req->request_body = content;
-    mcp_req->request_len = ret;
-    
-    // Use mcp_malloc instead of strdup to avoid allocator mismatch
-    size_t uri_len = strlen(req->uri) + 1;
-    mcp_req->uri = mcp_malloc(uri_len);
-    if (mcp_req->uri) {
-        memcpy(mcp_req->uri, req->uri, uri_len);
-    }
-    
-    // Use mcp_malloc instead of strdup for headers too
-    if (header_len > 0) {
+    if (header_len > 0)
+    {
         mcp_req->headers = mcp_malloc(header_len + 1);
-        if (mcp_req->headers) {
+        if (mcp_req->headers)
+        {
             memcpy(mcp_req->headers, header_buffer, header_len + 1);
         }
-    } else {
-        mcp_req->headers = NULL;
     }
 
-    // Initialize response headers
-    mcp_req->response_headers = NULL;
-    mcp_req->response_headers_capacity = 0;
-    mcp_req->response_headers_length = 0;
+    // Detach from the HTTP task: the worker replies on the async copy
+    if (httpd_req_async_handler_begin(req, &mcp_req->http_req) != ESP_OK)
+    {
+        mcp_request_free(mcp_req);
+        return send_http_error(req, "500 Internal Server Error", -32603, "Memory allocation failed");
+    }
 
-    mcp_req->completed = false;
-    mcp_req->result = ESP_OK;
-    pthread_mutex_init(&mcp_req->completion_mutex, NULL);
-    pthread_cond_init(&mcp_req->completion_cond, NULL);
+    ESP_LOGI(TAG, "Queuing MCP request to %s", mcp_req->uri);
 
-    ESP_LOGI(TAG, "Queuing MCP request to %s", req->uri);
-
-    // Send request to worker pthread
-    if (xQueueSend(g_pool.request_queue, &mcp_req, pdMS_TO_TICKS(5000)) != pdTRUE)
+    if (xQueueSend(g_pool.request_queue, &mcp_req, 0) != pdTRUE)
     {
         ESP_LOGE(TAG, "Failed to queue MCP request - pool busy");
-
-        // Cleanup
-        mcp_free(mcp_req->response);
-        mcp_free(mcp_req->request_body);
-        mcp_free(mcp_req->uri);
-        if (mcp_req->headers)
-            mcp_free(mcp_req->headers);
-        if (mcp_req->response_headers)
-            mcp_free(mcp_req->response_headers);
-        pthread_mutex_destroy(&mcp_req->completion_mutex);
-        pthread_cond_destroy(&mcp_req->completion_cond);
-        mcp_free(mcp_req);
-        mcp_free(header_buffer);
-
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Service busy");
-        return ESP_FAIL;
+        httpd_req_t *async_req = mcp_req->http_req;
+        send_http_error(async_req, "503 Service Unavailable", -32000, "Server busy, retry later");
+        httpd_req_async_handler_complete(async_req);
+        mcp_request_free(mcp_req);
     }
-
-    // Wait for completion (with timeout)
-    pthread_mutex_lock(&mcp_req->completion_mutex);
-    struct timespec timeout;
-    clock_gettime(CLOCK_REALTIME, &timeout);
-    timeout.tv_sec += 30; // 30 second timeout
-
-    int wait_result = 0;
-    while (!mcp_req->completed && wait_result == 0)
-    {
-        wait_result = pthread_cond_timedwait(&mcp_req->completion_cond,
-                                             &mcp_req->completion_mutex, &timeout);
-    }
-    pthread_mutex_unlock(&mcp_req->completion_mutex);
-
-    if (wait_result != 0 || !mcp_req->completed)
-    {
-        ESP_LOGE(TAG, "MCP request timeout or failed");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Request timeout");
-        
-        // Cleanup on timeout
-        mcp_free(mcp_req->response);
-        mcp_free(mcp_req->request_body);
-        mcp_free(mcp_req->uri);
-        if (mcp_req->headers)
-            mcp_free(mcp_req->headers);
-        if (mcp_req->response_headers)
-            mcp_free(mcp_req->response_headers);
-        pthread_mutex_destroy(&mcp_req->completion_mutex);
-        pthread_cond_destroy(&mcp_req->completion_cond);
-        mcp_free(mcp_req);
-        mcp_free(header_buffer);
-        return ESP_FAIL;
-    }
-    else
-    {
-        // Send response
-        //httpd_resp_set_status(req, "200 OK");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "POST, OPTIONS");
-        httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
-
-        // Apply response headers set by WASM module
-        ESP_LOGI(TAG, "Response headers length: %d", mcp_req->response_headers_length);
-        if (mcp_req->response_headers) {
-            ESP_LOGI(TAG, "Response headers raw: %s", mcp_req->response_headers);
-        }
-        
-        // Track allocated header buffers to free after response is sent
-        #define MAX_RESPONSE_HEADERS 10
-        char *header_buffers[MAX_RESPONSE_HEADERS * 2] = {0}; // name,value pairs
-        int header_buffer_count = 0;
-        
-        if (mcp_req->response_headers && mcp_req->response_headers_length > 0)
-        {
-            ESP_LOGI(TAG, "Applying response headers: %s", mcp_req->response_headers);
-
-            // Parse and apply headers from string buffer
-            const char *pos = mcp_req->response_headers;
-            while (*pos && header_buffer_count < MAX_RESPONSE_HEADERS * 2)
-            {
-                // Find header name (before colon)
-                const char *colon = strchr(pos, ':');
-                if (!colon)
-                    break;
-
-                // Extract header name
-                size_t name_len = colon - pos;
-                
-                if (name_len > 0 && name_len < 128)
-                {
-                    // Allocate and copy header name
-                    char *header_name = mcp_malloc(name_len + 1);
-                    if (!header_name) {
-                        ESP_LOGE(TAG, "Failed to allocate header name");
-                        break;
-                    }
-                    strncpy(header_name, pos, name_len);
-                    header_name[name_len] = '\0';
-                    header_buffers[header_buffer_count++] = header_name;
-
-                    // Find header value (after colon and whitespace)
-                    const char *value = colon + 1;
-                    while (*value == ' ' || *value == '\t')
-                        value++;
-
-                    // Find end of value (before \r\n)
-                    const char *value_end = strstr(value, "\r\n");
-                    if (value_end)
-                    {
-                        size_t value_len = value_end - value;
-                        if (value_len < 256)
-                        {
-                            // Allocate and copy header value
-                            char *header_value = mcp_malloc(value_len + 1);
-                            if (!header_value) {
-                                ESP_LOGE(TAG, "Failed to allocate header value");
-                                break;
-                            }
-                            strncpy(header_value, value, value_len);
-                            header_value[value_len] = '\0';
-                            header_buffers[header_buffer_count++] = header_value;
-
-                            // Apply header to HTTP response
-                            // httpd_resp_set_hdr stores pointers, so we keep them allocated
-                            httpd_resp_set_hdr(req, header_name, header_value);
-                            ESP_LOGI(TAG, "Applied header: %s = %s", header_name, header_value);
-                        }
-                    }
-                }
-
-                // Move to next line
-                const char *next_line = strstr(pos, "\r\n");
-                if (!next_line)
-                    break;
-                pos = next_line + 2;
-            }
-        }
-
-        ESP_LOGI(TAG, "Sending MCP response: %s", mcp_req->response);
-        esp_err_t result = httpd_resp_send(req, mcp_req->response, strlen(mcp_req->response));
-
-        if(result != ESP_OK)
-        {
-            ESP_LOGI(TAG, "Failed to send MCP response: %s", esp_err_to_name(result));
-        }
-
-        ESP_LOGI(TAG, "MCP response sent: %s", mcp_req->response);
-        
-        // Now safe to free header buffers after response is sent
-        for (int i = 0; i < header_buffer_count; i++) {
-            if (header_buffers[i]) {
-                mcp_free(header_buffers[i]);
-            }
-        }
-    }
-
-    // Cleanup request structure
-    mcp_free(mcp_req->response);
-    mcp_free(mcp_req->request_body);
-    mcp_free(mcp_req->uri);
-    if (mcp_req->headers)
-        mcp_free(mcp_req->headers);
-    if (mcp_req->response_headers)
-        mcp_free(mcp_req->response_headers);
-    pthread_mutex_destroy(&mcp_req->completion_mutex);
-    pthread_cond_destroy(&mcp_req->completion_cond);
-    mcp_free(mcp_req);
-    mcp_free(header_buffer);
 
     return ESP_OK;
 }

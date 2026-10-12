@@ -11,6 +11,8 @@
 #include "esp_netif.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char* TAG = "MCP_SESSION";
 
@@ -18,6 +20,10 @@ static const char* TAG = "MCP_SESSION";
 
 static mcp_session_t g_sessions[MCP_MAX_SESSIONS];
 static pthread_mutex_t g_sessions_mutex = PTHREAD_MUTEX_INITIALIZER;
+// Serializes every write to an SSE stream (keep-alive pings from the SSE task and
+// events from worker threads) and guards against writing to a stream that is
+// being torn down. Lock order: g_sse_io_mutex, then g_sessions_mutex.
+static pthread_mutex_t g_sse_io_mutex = PTHREAD_MUTEX_INITIALIZER;
 static bool g_manager_initialized = false;
 static mcp_session_config_t g_config = {
     .max_sessions = MCP_MAX_SESSIONS,
@@ -292,10 +298,10 @@ esp_err_t mcp_session_register_sse(const char* session_id, httpd_req_t* req) {
         return ESP_ERR_NOT_FOUND;
     }
     
-    // Close any existing SSE connection
+    // An older stream for this session notices it is no longer current and
+    // closes itself from its own task (see mcp_sse_task)
     if (session->sse_active && session->sse_req) {
         ESP_LOGW(TAG, "Replacing existing SSE connection for session: %s", session_id);
-        mcp_sse_close_connection(session->sse_req);
     }
     
     // Register new SSE connection
@@ -330,6 +336,27 @@ void mcp_session_unregister_sse(const char* session_id) {
     pthread_mutex_unlock(&g_sessions_mutex);
 }
 
+// Unregister only if req is still the session's active stream
+static void unregister_sse_if_current(const char* session_id, httpd_req_t* req) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    mcp_session_t* session = find_session_locked(session_id);
+    if (session && session->sse_req == req) {
+        session->sse_req = NULL;
+        session->sse_active = false;
+        session->socket_fd = -1;
+        ESP_LOGI(TAG, "Unregistered SSE connection for session: %s", session_id);
+    }
+    pthread_mutex_unlock(&g_sessions_mutex);
+}
+
+static bool sse_is_current(const char* session_id, httpd_req_t* req) {
+    pthread_mutex_lock(&g_sessions_mutex);
+    mcp_session_t* session = find_session_locked(session_id);
+    bool current = session && session->sse_active && session->sse_req == req;
+    pthread_mutex_unlock(&g_sessions_mutex);
+    return current;
+}
+
 bool mcp_session_has_sse(const char* session_id) {
     if (!session_id) return false;
     
@@ -348,34 +375,37 @@ esp_err_t mcp_session_send_event(const char* session_id, const char* event_type,
         return ESP_ERR_INVALID_ARG;
     }
     
+    // Hold the I/O lock across lookup and send so the stream can't be completed
+    // (freed) by its SSE task while we write to it
+    pthread_mutex_lock(&g_sse_io_mutex);
     pthread_mutex_lock(&g_sessions_mutex);
     
     mcp_session_t* session = find_session_locked(session_id);
     if (!session) {
         pthread_mutex_unlock(&g_sessions_mutex);
+        pthread_mutex_unlock(&g_sse_io_mutex);
         ESP_LOGW(TAG, "Session not found for event: %s", session_id);
         return ESP_ERR_NOT_FOUND;
     }
     
     if (!session->sse_active || !session->sse_req) {
         pthread_mutex_unlock(&g_sessions_mutex);
+        pthread_mutex_unlock(&g_sse_io_mutex);
         ESP_LOGW(TAG, "No SSE connection for session: %s", session_id);
         return ESP_ERR_INVALID_STATE;
     }
     
-    // Copy request handle for sending (to avoid holding mutex during I/O)
     httpd_req_t* req = session->sse_req;
-    
     pthread_mutex_unlock(&g_sessions_mutex);
     
-    // Send the event using framework SSE functions
     esp_err_t ret = mcp_sse_send_simple(req, event_type, data);
+    pthread_mutex_unlock(&g_sse_io_mutex);
     
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "Failed to send SSE event to session %s: %s", 
                  session_id, esp_err_to_name(ret));
-        // Mark connection as inactive on error
-        mcp_session_unregister_sse(session_id);
+        // Mark connection as inactive on error; its SSE task will clean up
+        unregister_sse_if_current(session_id, req);
     } else {
         ESP_LOGD(TAG, "Sent SSE event to session %s: %s = %s", 
                  session_id, event_type ? event_type : "message", data);
@@ -551,6 +581,54 @@ esp_err_t mcp_session_get_stats(int* active_sessions, int* sse_connections) {
 
 // ========== SSE Handler ==========
 
+
+typedef struct {
+    httpd_req_t* req;   // async copy, owned by the task
+    char session_id[MCP_SESSION_ID_LENGTH];
+} mcp_sse_task_ctx_t;
+
+// One task per open SSE stream: sends keep-alive pings until the client goes
+// away or the session gets a newer stream, then closes and completes the request.
+static void mcp_sse_task(void* arg) {
+    mcp_sse_task_ctx_t* ctx = (mcp_sse_task_ctx_t*)arg;
+    httpd_req_t* req = ctx->req;
+    
+    uint64_t last_ping = get_timestamp_ms();
+    int ping_interval_ms = g_config.sse_keepalive_seconds * 1000;
+    
+    while (sse_is_current(ctx->session_id, req)) {
+        uint64_t now = get_timestamp_ms();
+        
+        if ((now - last_ping) >= ping_interval_ms) {
+            char ping_data[64];
+            snprintf(ping_data, sizeof(ping_data), "{\"timestamp\":%llu}", now);
+            pthread_mutex_lock(&g_sse_io_mutex);
+            esp_err_t ret = mcp_sse_send_simple(req, "ping", ping_data);
+            pthread_mutex_unlock(&g_sse_io_mutex);
+            if (ret != ESP_OK) {
+                ESP_LOGW(TAG, "SSE ping failed, closing connection");
+                break;
+            }
+            last_ping = now;
+            mcp_session_touch(ctx->session_id);
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    unregister_sse_if_current(ctx->session_id, req);
+    
+    // Wait for any in-flight event write, then close and release the request
+    pthread_mutex_lock(&g_sse_io_mutex);
+    mcp_sse_close_connection(req);
+    httpd_req_async_handler_complete(req);
+    pthread_mutex_unlock(&g_sse_io_mutex);
+    
+    ESP_LOGI(TAG, "SSE stream finished for session: %s", ctx->session_id);
+    free(ctx);
+    vTaskDelete(NULL);
+}
+
 esp_err_t mcp_session_sse_handler(httpd_req_t *req) {
     char session_id[MCP_SESSION_ID_LENGTH];
     
@@ -567,59 +645,43 @@ esp_err_t mcp_session_sse_handler(httpd_req_t *req) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Session error");
     }
     
-    // Initialize SSE connection
+    mcp_sse_task_ctx_t* ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+    }
+    strlcpy(ctx->session_id, valid_session, sizeof(ctx->session_id));
+    
+    // Initialize SSE connection (sends headers and the "connected" event)
     esp_err_t ret = mcp_sse_init_connection(req);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize SSE connection");
+        free(ctx);
         return ret;
     }
     
-    // Register SSE with session
-    ret = mcp_session_register_sse(valid_session, req);
+    // Hand the stream to its own task so the HTTP server task stays free
+    if (httpd_req_async_handler_begin(req, &ctx->req) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to detach SSE request");
+        free(ctx);
+        return ESP_FAIL;
+    }
+    
+    ret = mcp_session_register_sse(ctx->session_id, ctx->req);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register SSE with session");
-        return ret;
+        httpd_req_async_handler_complete(ctx->req);
+        free(ctx);
+        return ESP_OK;
     }
     
-    ESP_LOGI(TAG, "SSE handler started for session: %s", valid_session);
-    
-    // Keep connection alive with periodic pings
-    uint64_t last_ping = get_timestamp_ms();
-    int ping_interval_ms = g_config.sse_keepalive_seconds * 1000;
-    
-    while (true) {
-        uint64_t now = get_timestamp_ms();
-        
-        // Send keep-alive ping
-        if ((now - last_ping) >= ping_interval_ms) {
-            char ping_data[64];
-            snprintf(ping_data, sizeof(ping_data), "{\"timestamp\":%llu}", now);
-            ret = mcp_sse_send_simple(req, "ping", ping_data);
-            if (ret != ESP_OK) {
-                ESP_LOGW(TAG, "SSE ping failed, closing connection");
-                break;
-            }
-            last_ping = now;
-            
-            // Also update session activity
-            mcp_session_touch(valid_session);
-        }
-        
-        // Short delay to prevent busy loop
-        vTaskDelay(pdMS_TO_TICKS(100));
-        
-        // Check if connection is still valid
-        int socket_fd = httpd_req_to_sockfd(req);
-        if (socket_fd < 0) {
-            ESP_LOGW(TAG, "SSE socket closed");
-            break;
-        }
+    if (xTaskCreate(mcp_sse_task, "mcp_sse", 6144, ctx, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start SSE task");
+        unregister_sse_if_current(ctx->session_id, ctx->req);
+        httpd_req_async_handler_complete(ctx->req);
+        free(ctx);
+        return ESP_OK;
     }
     
-    // Clean up
-    mcp_session_unregister_sse(valid_session);
-    mcp_sse_close_connection(req);
-    
-    ESP_LOGI(TAG, "SSE handler finished for session: %s", valid_session);
+    ESP_LOGI(TAG, "SSE stream started for session: %s", ctx->session_id);
     return ESP_OK;
 }

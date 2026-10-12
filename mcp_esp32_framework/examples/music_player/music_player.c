@@ -269,9 +269,10 @@ mcp_result_t play_melody_handler(const char* params) {
 // Play melody via local I2S (existing implementation)
 static mcp_result_t play_melody_local_i2s(const char* melody, int volume, char* result_json, size_t result_size) {
     // Convert note names to frequencies for the new continuous playback
-    // Allocate dynamic buffer with 3x expansion factor for frequency conversion
+    // Allocate dynamic buffer for the note-name -> frequency expansion
     size_t melody_len = strlen(melody);
-    size_t frequency_buffer_size = melody_len * 3 + 1;  // 3x expansion + null terminator
+    // Worst case a bare note "C4," (3 bytes) becomes "4186.01:500," (12 bytes)
+    size_t frequency_buffer_size = melody_len * 5 + 32;
     char* frequency_melody = malloc(frequency_buffer_size);
     if (!frequency_melody) {
         return mcp_error(-5, "Failed to allocate memory for frequency melody buffer");
@@ -419,9 +420,10 @@ static mcp_result_t play_melody_bluetooth_a2dp(const char* melody, int volume, c
     log_info("MUSIC", "Starting Bluetooth A2DP melody playback");
     
     // Convert note names to frequencies (same as I2S version)
-    // Allocate dynamic buffer with 3x expansion factor for frequency conversion
+    // Allocate dynamic buffer for the note-name -> frequency expansion
     size_t melody_len = strlen(melody);
-    size_t frequency_buffer_size = melody_len * 3 + 1;  // 3x expansion + null terminator
+    // Worst case a bare note "C4," (3 bytes) becomes "4186.01:500," (12 bytes)
+    size_t frequency_buffer_size = melody_len * 5 + 32;
     char* frequency_melody = malloc(frequency_buffer_size);
     if (!frequency_melody) {
         return mcp_error(-5, "Failed to allocate memory for frequency melody buffer");
@@ -758,6 +760,7 @@ static int parse_note_duration(const char* note_with_duration, char* note_out, i
     const char* colon = strstr(note_with_duration, ":");
     if (!colon) {
         // No duration specified, use default
+        if (strlen(note_with_duration) >= MAX_NOTE_LENGTH) return -1;
         strcpy(note_out, note_with_duration);
         *duration_out = 500; // Default 500ms
         return 0;

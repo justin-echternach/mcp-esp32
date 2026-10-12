@@ -43,6 +43,7 @@
 #include "esp_event.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "lwip/inet.h"
 
 static const char *TAG = "mcp-wamr";
@@ -223,6 +224,7 @@ static httpd_handle_t start_webserver(void) {
     http_config.port = 80;
     http_config.max_uri_handlers = 16;
     http_config.cors_enabled = true;
+    http_config.stack_size = 8192;      // default 4KB is tight for the SSE/handler paths
     
     // Start HTTP server using framework
     httpd_handle_t server = mcp_http_server_start(&http_config);
@@ -258,20 +260,50 @@ static httpd_handle_t start_webserver(void) {
 }
 
 
+// Reconnect timer: retries never stop, but back off from 1s up to 60s so a
+// router reboot or outage doesn't leave the device offline until power-cycled
+static esp_timer_handle_t s_wifi_reconnect_timer = NULL;
+
+static void wifi_reconnect_cb(void* arg) {
+    esp_wifi_connect();
+}
+
+static void wifi_schedule_reconnect(void) {
+    if (!s_wifi_reconnect_timer) {
+        const esp_timer_create_args_t args = {
+            .callback = wifi_reconnect_cb,
+            .name = "wifi_reconnect",
+        };
+        if (esp_timer_create(&args, &s_wifi_reconnect_timer) != ESP_OK) {
+            esp_wifi_connect();  // fall back to an immediate retry
+            return;
+        }
+    }
+
+    int shift = g_s_retry_num < 6 ? g_s_retry_num : 6;
+    uint64_t delay_ms = 1000ULL << shift;  // 1, 2, 4 ... 64s
+    if (delay_ms > 60000) {
+        delay_ms = 60000;
+    }
+    g_s_retry_num++;
+
+    esp_timer_stop(s_wifi_reconnect_timer);
+    esp_timer_start_once(s_wifi_reconnect_timer, delay_ms * 1000);
+    ESP_LOGW(TAG, "WiFi disconnected, retry %d in %llu ms", g_s_retry_num, delay_ms);
+}
+
 // WiFi event handler - keep in main.c to avoid linking issues
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (g_s_retry_num < g_wifi_maximum_retry) {
-            esp_wifi_connect();
-            g_s_retry_num++;
-            ESP_LOGI(TAG, "Retry connecting to WiFi...");
-        } else {
+        xEventGroupClearBits(g_wifi_event_group, g_wifi_connected_bit);
+        // BIT1 only tells boot code the first attempts failed; we keep retrying
+        if (g_s_retry_num >= g_wifi_maximum_retry) {
             xEventGroupSetBits(g_wifi_event_group, BIT1);
         }
-        ESP_LOGI(TAG,"WiFi connection failed");
+        wifi_schedule_reconnect();
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));

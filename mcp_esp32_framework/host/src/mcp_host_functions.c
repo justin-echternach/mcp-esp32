@@ -1215,7 +1215,27 @@ static int32_t i2s_bits_per_sample = 16;
 static int32_t i2s_volume = 50; // Default 50%
 static bool i2s_playing = false;
 static esp_timer_handle_t i2s_timer_handle = NULL;
-static TaskHandle_t i2s_task_handle = NULL;
+// Tone and melody playback each run in their own task. A task clears its handle
+// as the last thing it does, so "handle == NULL" means it has fully stopped.
+static TaskHandle_t volatile i2s_tone_task_handle = NULL;
+static TaskHandle_t volatile i2s_melody_task_handle = NULL;
+
+// Serializes the audio API (play/stop/deinit) across worker threads, so two
+// modules can't start or tear down playback underneath each other
+static pthread_mutex_t s_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Longest a single i2s_write may block. Normal writes finish in well under the
+// DMA queue length (~370ms); this keeps a task from hanging if I2S is stopped.
+#define I2S_WRITE_TIMEOUT_MS 1000
+
+static bool wait_for_task_exit(TaskHandle_t volatile *handle, int timeout_ms)
+{
+    for (int waited = 0; *handle && waited < timeout_ms; waited += 10)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return *handle == NULL;
+}
 
 // I2S pin configuration (FreenoVE Audio Converter & Amplifier)
 #define I2S_BCK_PIN 27  // Bit Clock
@@ -1513,6 +1533,8 @@ static void i2s_audio_task(void *pvParameters)
             heap_caps_free(buffer_A);
         if (buffer_B)
             heap_caps_free(buffer_B);
+        i2s_playing = false;
+        i2s_tone_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -1552,7 +1574,7 @@ static void i2s_audio_task(void *pvParameters)
         // Start writing current buffer to I2S (this will block until DMA accepts it)
         esp_err_t ret = i2s_write(I2S_NUM_0, current_buffer,
                                   buffer_size,
-                                  &bytes_written, portMAX_DELAY);
+                                  &bytes_written, pdMS_TO_TICKS(I2S_WRITE_TIMEOUT_MS));
 
         // esp_err_t ret = i2s_write(I2S_NUM_0, current_buffer, buffer_size,
         //                           &bytes_written, pdMS_TO_TICKS(10));
@@ -1602,7 +1624,8 @@ static void i2s_audio_task(void *pvParameters)
     // Clean up both buffers
     heap_caps_free(buffer_A);
     heap_caps_free(buffer_B);
-    i2s_task_handle = NULL;
+    i2s_playing = false;
+    i2s_tone_task_handle = NULL;
     vTaskDelete(NULL);
 }
 
@@ -1767,7 +1790,10 @@ static void i2s_melody_task(void *pvParameters) {
         ESP_LOGE(TAG, "Failed to allocate I2S melody buffers");
         if (buffer_A) heap_caps_free(buffer_A);
         if (buffer_B) heap_caps_free(buffer_B);
+        heap_caps_free(melody_state.notes);
+        melody_state.notes = NULL;
         melody_state.is_playing = false;
+        i2s_melody_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -1783,7 +1809,10 @@ static void i2s_melody_task(void *pvParameters) {
         ESP_LOGE(TAG, "Failed to start I2S in melody task: %s", esp_err_to_name(i2s_ret));
         heap_caps_free(buffer_A);
         heap_caps_free(buffer_B);
+        heap_caps_free(melody_state.notes);
+        melody_state.notes = NULL;
         melody_state.is_playing = false;
+        i2s_melody_task_handle = NULL;
         vTaskDelete(NULL);
         return;
     }
@@ -1960,7 +1989,7 @@ static void i2s_melody_task(void *pvParameters) {
         
         // Write buffer to I2S
         esp_err_t ret = i2s_write(I2S_NUM_0, current_buffer, buffer_size, 
-                                 &bytes_written, portMAX_DELAY);
+                                 &bytes_written, pdMS_TO_TICKS(I2S_WRITE_TIMEOUT_MS));
         
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "I2S write failed in melody task: %s", esp_err_to_name(ret));
@@ -1992,7 +2021,7 @@ static void i2s_melody_task(void *pvParameters) {
     melody_state.note_count = 0;
     melody_state.is_playing = false;
     
-    i2s_task_handle = NULL;
+    i2s_melody_task_handle = NULL;
     vTaskDelete(NULL);
 }
 
@@ -2005,6 +2034,31 @@ static void i2s_timer_callback(void *arg)
         esp_timer_stop(i2s_timer_handle);
     }
     ESP_LOGD(TAG, "I2S tone duration completed");
+}
+
+// Stop tone playback and wait for its task to exit. Caller holds s_audio_mutex.
+static void i2s_stop_tone_locked(void)
+{
+    i2s_playing = false;
+    if (i2s_timer_handle)
+    {
+        esp_timer_stop(i2s_timer_handle);
+    }
+    if (!wait_for_task_exit(&i2s_tone_task_handle, 2 * I2S_WRITE_TIMEOUT_MS))
+    {
+        ESP_LOGE(TAG, "I2S tone task did not exit");
+    }
+}
+
+// Stop melody playback and wait for its task to exit (it frees the notes).
+// Caller holds s_audio_mutex.
+static void i2s_stop_melody_locked(void)
+{
+    melody_state.is_playing = false;
+    if (!wait_for_task_exit(&i2s_melody_task_handle, 2 * I2S_WRITE_TIMEOUT_MS))
+    {
+        ESP_LOGE(TAG, "I2S melody task did not exit");
+    }
 }
 
 int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t bits_per_sample)
@@ -2166,8 +2220,12 @@ int32_t native_i2s_deinit(wasm_exec_env_t exec_env)
         return 0;
     }
 
+    pthread_mutex_lock(&s_audio_mutex);
+
     // Stop playback
-    native_i2s_stop_tone(exec_env);
+    i2s_stop_tone_locked();
+    i2s_stop_melody_locked();
+    i2s_zero_dma_buffer(I2S_NUM_0);
 
     // Clean up timer
     if (i2s_timer_handle)
@@ -2188,6 +2246,7 @@ int32_t native_i2s_deinit(wasm_exec_env_t exec_env)
 
     i2s_initialized = false;
     mcp_host_release_pins(i2s_pins, 3);
+    pthread_mutex_unlock(&s_audio_mutex);
     ESP_LOGI(TAG, "I2S deinitialized");
 
     return 0;
@@ -2214,8 +2273,17 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
         return -3;
     }
 
-    // Stop any current playback
-    native_i2s_stop_tone(exec_env);
+    if (duration_ms < 0 || duration_ms > 60000)
+    {
+        ESP_LOGE(TAG, "Duration out of range: %d ms", duration_ms);
+        return -4;
+    }
+
+    pthread_mutex_lock(&s_audio_mutex);
+
+    // Stop any current playback (tone or melody) before starting a new tone
+    i2s_stop_melody_locked();
+    i2s_stop_tone_locked();
 
     // Set audio parameters
     current_frequency = (float)frequency_hz;
@@ -2233,11 +2301,15 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
         4096,
         NULL,
         20,
-        &i2s_task_handle,
+        (TaskHandle_t *)&i2s_tone_task_handle,
         1);
 
     if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create I2S melody task, error code: %d", (int)task_ret);
+        ESP_LOGE(TAG, "Failed to create I2S tone task, error code: %d", (int)task_ret);
+        i2s_playing = false;
+        i2s_tone_task_handle = NULL;
+        pthread_mutex_unlock(&s_audio_mutex);
+        return -5;
     }
 
     // Set duration timer if specified
@@ -2249,6 +2321,8 @@ int32_t native_i2s_play_tone(wasm_exec_env_t exec_env, int32_t frequency_hz, int
             ESP_LOGW(TAG, "Failed to start duration timer: %s", esp_err_to_name(ret));
         }
     }
+
+    pthread_mutex_unlock(&s_audio_mutex);
 
     ESP_LOGI(TAG, "Playing I2S tone: %d Hz, %d ms, %d%% volume", frequency_hz, duration_ms, volume_percent);
 
@@ -2262,29 +2336,12 @@ int32_t native_i2s_stop_tone(wasm_exec_env_t exec_env)
         return -1;
     }
 
-    // Stop playback
-    i2s_playing = false;
-
-    // Stop timer if running
-    if (i2s_timer_handle)
-    {
-        esp_timer_stop(i2s_timer_handle);
-    }
-
-    // Wait for task to finish
-    if (i2s_task_handle)
-    {
-        // Give task time to exit gracefully
-        vTaskDelay(pdMS_TO_TICKS(50));
-        if (i2s_task_handle)
-        {
-            vTaskDelete(i2s_task_handle);
-            i2s_task_handle = NULL;
-        }
-    }
+    pthread_mutex_lock(&s_audio_mutex);
+    i2s_stop_tone_locked();
 
     // Clear I2S DMA buffer
     i2s_zero_dma_buffer(I2S_NUM_0);
+    pthread_mutex_unlock(&s_audio_mutex);
 
     ESP_LOGI(TAG, "I2S tone stopped");
 
@@ -2357,12 +2414,6 @@ int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str,
         return -3;
     }
     
-    // Stop any current playback
-    if (melody_state.is_playing) {
-        melody_state.is_playing = false;
-        vTaskDelay(pdMS_TO_TICKS(100)); // Wait for task to clean up
-    }
-    
     // Parse the melody string
     melody_note_t *notes = NULL;
     int note_count = 0;
@@ -2377,6 +2428,13 @@ int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str,
         if (notes) heap_caps_free(notes);
         return -5;
     }
+    
+    pthread_mutex_lock(&s_audio_mutex);
+    
+    // Stop any current playback and wait until the old task has exited (and
+    // freed its notes) before installing the new melody
+    i2s_stop_tone_locked();
+    i2s_stop_melody_locked();
     
     // Initialize melody state
     melody_state.notes = notes;
@@ -2398,10 +2456,10 @@ int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str,
     BaseType_t task_ret = xTaskCreatePinnedToCore(
         i2s_melody_task,
         "i2s_melody",
-        2048,
+        3072,   // logs floats; 2KB was tight
         NULL,
         20,
-        &i2s_task_handle,
+        (TaskHandle_t *)&i2s_melody_task_handle,
         1);
     
     if (task_ret != pdPASS) {
@@ -2416,9 +2474,12 @@ int32_t native_i2s_play_melody(wasm_exec_env_t exec_env, const char *melody_str,
         heap_caps_free(notes);
         melody_state.notes = NULL;
         melody_state.is_playing = false;
+        i2s_melody_task_handle = NULL;
+        pthread_mutex_unlock(&s_audio_mutex);
         return -6;
     }
     
+    pthread_mutex_unlock(&s_audio_mutex);
     return 0;
 }
 
@@ -2428,11 +2489,9 @@ int32_t native_i2s_stop_melody(wasm_exec_env_t exec_env) {
         return -1;
     }
     
-    // Stop melody playback
-    melody_state.is_playing = false;
-    
-    // Wait a bit for task to clean up
-    vTaskDelay(pdMS_TO_TICKS(50));
+    pthread_mutex_lock(&s_audio_mutex);
+    i2s_stop_melody_locked();
+    pthread_mutex_unlock(&s_audio_mutex);
     
     ESP_LOGI(TAG, "Melody playback stopped");
     

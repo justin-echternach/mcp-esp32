@@ -24,10 +24,12 @@ typedef struct {
     size_t response_headers_capacity;
     size_t response_headers_length;
     
-    esp_err_t result;
-    bool completed;
-    pthread_mutex_t completion_mutex;
-    pthread_cond_t completion_cond;
+    size_t response_size;       // capacity of response
+
+    // Async copy of the HTTP request (httpd_req_async_handler_begin). The worker
+    // that processes the request sends the reply on it and then completes it, so
+    // the HTTP server task is free to serve other connections in the meantime.
+    httpd_req_t* http_req;
 } mcp_request_t;
 
 // MCP WASM Module Management structure (shared between main.c and pthread handler)

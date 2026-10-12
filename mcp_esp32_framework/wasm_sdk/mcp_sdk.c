@@ -358,10 +358,17 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     
     // Use snprintf with position tracking instead of strcat
 
-    char tools_result[2048];
+    // Build into a heap buffer sized to the host's reply buffer, so the tool list
+    // can use all of it rather than a fixed slice of the WASM stack
+    int tools_size = max_len;
+    char* tools_result = alloc_mcp_buffer(tools_size, "tools_result");
+    if (!tools_result) {
+        return create_jsonrpc_error(-32000, "Memory allocation failed", response, max_len);
+    }
     int pos = 0;
-    int written = snprintf(tools_result, sizeof(tools_result), "{\"tools\":[");
-    if (written < 0 || written >= sizeof(tools_result)) {
+    int written = snprintf(tools_result, tools_size, "{\"tools\":[");
+    if (written < 0 || written >= tools_size) {
+        free_mcp_buffer(tools_result);
         return create_jsonrpc_error(-32000, "Response buffer too small", response, max_len);
     }
     pos = written;
@@ -371,7 +378,7 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
         json_escape(g_tools[i].description, description, sizeof(description));
 
         // Build tool JSON directly into response buffer
-        written = snprintf(tools_result + pos, sizeof(tools_result) - pos,
+        written = snprintf(tools_result + pos, tools_size - pos,
             "%s{\"name\":\"%s\",\"title\":\"%s\",\"description\":\"%s\","
             "\"inputSchema\":%s}",
             i > 0 ? "," : "", 
@@ -380,15 +387,17 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
             description,
             g_tools[i].input_schema[0] ? g_tools[i].input_schema : "{\"type\":\"object\"}");
         
-        if (written < 0 || written >= (int)sizeof(tools_result) - pos) {
+        if (written < 0 || written >= tools_size - pos) {
+            free_mcp_buffer(tools_result);
             return create_jsonrpc_error(-32000, "Tool list too large for buffer", response, max_len);
         }
         pos += written;
     }
     
     // Close JSON array and object
-    written = snprintf(tools_result + pos, sizeof(tools_result) - pos, "]}");
-    if (written < 0 || written >= sizeof(tools_result) - pos) {
+    written = snprintf(tools_result + pos, tools_size - pos, "]}");
+    if (written < 0 || written >= tools_size - pos) {
+        free_mcp_buffer(tools_result);
         return create_jsonrpc_error(-32000, "Response buffer overflow", response, max_len);
     }
     
@@ -399,6 +408,7 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     int len = snprintf(response, max_len,
         "{\"jsonrpc\":\"2.0\",\"result\":%s,\"id\":%d}",
         tools_result, g_current_request_id);
+    free_mcp_buffer(tools_result);
     
     return len < max_len ? 0 : -2;
 }

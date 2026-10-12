@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <math.h>
+#include <pthread.h>
 
 
 static const char* TAG = "BT_HOST";
@@ -48,6 +49,12 @@ static int a2dp_current_note_index = 0;
 static int64_t a2dp_note_start_time_us = 0;
 static int a2dp_melody_volume = 50;
 static bool a2dp_melody_playing = false;
+
+// Guards the melody/stream buffers shared between the Bluetooth audio callback
+// (BT task) and bluetooth_play_melody / deinit (worker threads). The callback
+// only try-locks, so the Bluetooth task never blocks: if the buffers are being
+// swapped it sends one round of silence.
+static pthread_mutex_t s_a2dp_melody_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // A2DP streaming configuration
 #define A2DP_SAMPLE_RATE 44100
@@ -235,10 +242,12 @@ int32_t bluetooth_deinit(wasm_exec_env_t exec_env) {
     }
     
     // Stop and cleanup A2DP streaming
+    pthread_mutex_lock(&s_a2dp_melody_mutex);
     a2dp_streaming_active = false;
     a2dp_cleanup_streaming_buffer();
     a2dp_cleanup_sine_table();
     a2dp_cleanup_melody();
+    pthread_mutex_unlock(&s_a2dp_melody_mutex);
     
     // Deinitialize components in reverse order
     esp_avrc_ct_deinit();
@@ -811,7 +820,21 @@ static void a2dp_cleanup_streaming_buffer(void) {
 }
 
 // A2DP audio data callback - generates audio samples for streaming
+static int32_t a2dp_audio_callback_locked(uint8_t* data, int32_t len);
+
 static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
+    if (data && len > 0 && pthread_mutex_trylock(&s_a2dp_melody_mutex) != 0) {
+        memset(data, 0, len);
+        return len;
+    }
+    int32_t ret = a2dp_audio_callback_locked(data, len);
+    if (data && len > 0) {
+        pthread_mutex_unlock(&s_a2dp_melody_mutex);
+    }
+    return ret;
+}
+
+static int32_t a2dp_audio_callback_locked(uint8_t* data, int32_t len) {
     static int callback_count = 0;
     static float dc_filter_state = 0.0f;  // DC blocking filter state
     callback_count++;
@@ -1452,8 +1475,12 @@ int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, 
         return -1;
     }
     
+    // Swap in the new melody while the audio callback is locked out
+    pthread_mutex_lock(&s_a2dp_melody_mutex);
+    
     // Parse the melody string into notes
     if (a2dp_parse_melody(melody_str) != 0) {
+        pthread_mutex_unlock(&s_a2dp_melody_mutex);
         ESP_LOGE(TAG, "Failed to parse melody string");
         return -2;
     }
@@ -1465,11 +1492,13 @@ int32_t bluetooth_play_melody(wasm_exec_env_t exec_env, const char* melody_str, 
     if (a2dp_init_streaming_buffer() != 0) {
         ESP_LOGE(TAG, "Failed to initialize A2DP streaming buffer");
         a2dp_cleanup_melody();
+        pthread_mutex_unlock(&s_a2dp_melody_mutex);
         return -3;
     }
     
     // Start melody playback
     a2dp_start_melody();
+    pthread_mutex_unlock(&s_a2dp_melody_mutex);
     
     // Start A2DP streaming only if not already active (this will trigger the audio callback)
     if (!a2dp_streaming_active) {
