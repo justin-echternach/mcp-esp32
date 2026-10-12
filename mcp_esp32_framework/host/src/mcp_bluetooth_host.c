@@ -60,7 +60,14 @@ static bool a2dp_melody_playing = false;
 static int16_t* sine_lookup_table = NULL;
 
 // Audio generation state for phase continuity (one per chord note)
-static float a2dp_phases[MAX_CHORD_NOTES] = {0.0f, 0.0f, 0.0f, 0.0f};  // Current phases for each note in chord
+// We use two banks of oscillators for crossfading between notes
+static float a2dp_phases_current[MAX_CHORD_NOTES] = {0.0f, 0.0f, 0.0f, 0.0f};  // Current note phases
+static float a2dp_phases_previous[MAX_CHORD_NOTES] = {0.0f, 0.0f, 0.0f, 0.0f}; // Previous note phases (for crossfade)
+
+// Crossfade state
+static a2dp_note_t* a2dp_previous_note = NULL;  // Will be allocated in PSRAM
+static int a2dp_crossfade_samples = 0;           // Number of samples left in crossfade
+static const int CROSSFADE_DURATION_MS = 50;     // 50ms crossfade between notes
 
 // Forward declarations for A2DP streaming functions
 static int32_t a2dp_init_streaming_buffer(void);
@@ -806,6 +813,7 @@ static void a2dp_cleanup_streaming_buffer(void) {
 // A2DP audio data callback - generates audio samples for streaming
 static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
     static int callback_count = 0;
+    static float dc_filter_state = 0.0f;  // DC blocking filter state
     callback_count++;
     
     // Log every 100th callback to avoid log spam, plus first few
@@ -866,12 +874,27 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         a2dp_note_t* current_note = &a2dp_melody_notes[a2dp_current_note_index];
         
         if (elapsed_ms >= current_note->duration_ms) {
+            // Prepare for crossfade to next note
+
+            // Allocate previous note structure in PSRAM if needed
+            if (!a2dp_previous_note) {
+                a2dp_previous_note = (a2dp_note_t*)mcp_malloc(sizeof(a2dp_note_t));
+            }
+
+            if (a2dp_previous_note) {
+                // Copy current note to previous for crossfading
+                memcpy(a2dp_previous_note, current_note, sizeof(a2dp_note_t));
+
+                // Copy current phases to previous phases
+                memcpy(a2dp_phases_previous, a2dp_phases_current, sizeof(a2dp_phases_previous));
+
+                // Start crossfade
+                a2dp_crossfade_samples = (CROSSFADE_DURATION_MS * A2DP_SAMPLE_RATE) / 1000;
+            }
+
             // Move to next note
             a2dp_current_note_index++;
             a2dp_note_start_time_us = current_time_us;
-
-            // Don't reset phases - maintain continuity between notes/chords
-            // This prevents clicks/pops at transitions
 
             if (a2dp_current_note_index < a2dp_melody_count) {
                 a2dp_note_t* next_note = &a2dp_melody_notes[a2dp_current_note_index];
@@ -897,35 +920,26 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
         }
     }
     
-    // Generate audio for current note or chord
+    // Generate audio for current note or chord (with crossfading)
     if (a2dp_current_note_index < a2dp_melody_count) {
         a2dp_note_t* current_note = &a2dp_melody_notes[a2dp_current_note_index];
         float volume_scale = (float)a2dp_melody_volume / 100.0f;
 
-        // Calculate envelope for smooth transitions (20ms fade in/out)
-        const int fade_duration_ms = 20;
-        float envelope = 1.0f;
+        // Calculate crossfade factor if we're in a crossfade
+        float current_gain = 1.0f;
+        float previous_gain = 0.0f;
 
-        // Fade in at the beginning of the note
-        if (elapsed_ms < fade_duration_ms) {
-            envelope = (float)elapsed_ms / (float)fade_duration_ms;
+        if (a2dp_crossfade_samples > 0 && a2dp_previous_note) {
+            // Calculate crossfade gains using cosine interpolation
+            float crossfade_progress = 1.0f - ((float)a2dp_crossfade_samples /
+                                              ((float)(CROSSFADE_DURATION_MS * A2DP_SAMPLE_RATE) / 1000.0f));
+            previous_gain = 0.5f * (1.0f + cosf(M_PI * crossfade_progress));
+            current_gain = 0.5f * (1.0f - cosf(M_PI * crossfade_progress));
         }
-        // Fade out at the end of the note
-        else if (elapsed_ms > current_note->duration_ms - fade_duration_ms) {
-            int remaining_ms = current_note->duration_ms - elapsed_ms;
-            if (remaining_ms > 0) {
-                envelope = (float)remaining_ms / (float)fade_duration_ms;
-            } else {
-                envelope = 0.0f;
-            }
-        }
-
-        // Apply envelope to volume
-        volume_scale *= envelope;
 
         if (callback_count <= 3) {
-            ESP_LOGI(TAG, "A2DP callback: Generating audio - %d frequencies, vol=%.2f, env=%.2f",
-                     current_note->frequency_count, volume_scale, envelope);
+            ESP_LOGI(TAG, "A2DP callback: Generating audio - %d frequencies, vol=%.2f, crossfade: cur=%.2f prev=%.2f",
+                     current_note->frequency_count, volume_scale, current_gain, previous_gain);
         }
         
         // Add bounds check for sample array access
@@ -935,37 +949,79 @@ static int32_t a2dp_audio_callback(uint8_t* data, int32_t len) {
             return len;
         }
         
-        // Calculate phase increments for all frequencies in the chord
-        float phase_increments[MAX_CHORD_NOTES];
+        // Calculate phase increments for current note
+        float phase_increments_current[MAX_CHORD_NOTES];
         for (int n = 0; n < current_note->frequency_count; n++) {
-            phase_increments[n] = current_note->frequencies[n] / (float)A2DP_SAMPLE_RATE;
+            phase_increments_current[n] = current_note->frequencies[n] / (float)A2DP_SAMPLE_RATE;
         }
-        
+
+        // Calculate phase increments for previous note (if crossfading)
+        float phase_increments_previous[MAX_CHORD_NOTES];
+        if (a2dp_previous_note) {
+            for (int n = 0; n < a2dp_previous_note->frequency_count; n++) {
+                phase_increments_previous[n] = a2dp_previous_note->frequencies[n] / (float)A2DP_SAMPLE_RATE;
+            }
+        }
+
         for (int32_t i = 0; i < sample_count; i += 2) {
             // Safety check before array access
             if (i + 1 >= sample_count) {
                 ESP_LOGE(TAG, "A2DP callback: Array bounds error i=%d, sample_count=%d", i, sample_count);
                 break;
             }
-            
-            // Mix all frequencies in the chord
+
             float mixed_sample = 0.0f;
-            for (int n = 0; n < current_note->frequency_count; n++) {
-                // Generate sine wave for each frequency
-                int16_t raw_sample = a2dp_sine_lookup(a2dp_phases[n]);
-                // Simple average mixing to prevent clipping
-                mixed_sample += (float)raw_sample / current_note->frequency_count;
-                
-                // Advance phase with wrap-around for continuity
-                a2dp_phases[n] += phase_increments[n];
-                if (a2dp_phases[n] >= 1.0f) {
-                    a2dp_phases[n] -= 1.0f;
+
+            // Generate current note with its gain
+            if (current_gain > 0.001f) {  // Skip if essentially zero
+                float current_mix = 0.0f;
+                for (int n = 0; n < current_note->frequency_count; n++) {
+                    int16_t raw_sample = a2dp_sine_lookup(a2dp_phases_current[n]);
+                    current_mix += (float)raw_sample / current_note->frequency_count;
+
+                    // Advance phase
+                    a2dp_phases_current[n] += phase_increments_current[n];
+                    if (a2dp_phases_current[n] >= 1.0f) {
+                        a2dp_phases_current[n] -= 1.0f;
+                    }
                 }
+                mixed_sample += current_mix * current_gain;
+            }
+
+            // Generate previous note with its gain (if crossfading)
+            if (previous_gain > 0.001f && a2dp_previous_note) {
+                float previous_mix = 0.0f;
+                for (int n = 0; n < a2dp_previous_note->frequency_count; n++) {
+                    int16_t raw_sample = a2dp_sine_lookup(a2dp_phases_previous[n]);
+                    previous_mix += (float)raw_sample / a2dp_previous_note->frequency_count;
+
+                    // Advance phase
+                    a2dp_phases_previous[n] += phase_increments_previous[n];
+                    if (a2dp_phases_previous[n] >= 1.0f) {
+                        a2dp_phases_previous[n] -= 1.0f;
+                    }
+                }
+                mixed_sample += previous_mix * previous_gain;
+            }
+
+            // Update crossfade counter (once per stereo sample pair)
+            if (a2dp_crossfade_samples > 0) {
+                a2dp_crossfade_samples--;
             }
             
-            // Apply volume and convert to int16_t
-            int16_t sample = (int16_t)(mixed_sample * volume_scale * 0.5f); // Scale down to prevent clipping
-            
+            // Apply volume
+            float output_sample = mixed_sample * volume_scale * 0.5f; // Scale down to prevent clipping
+
+            // Simple high-pass filter to remove DC offset (cutoff ~20Hz)
+            const float dc_filter_alpha = 0.995f;  // Higher = lower cutoff frequency
+            float filtered_sample = output_sample - dc_filter_state;
+            dc_filter_state = dc_filter_state * dc_filter_alpha + output_sample * (1.0f - dc_filter_alpha);
+
+            // Convert to int16_t with clamping
+            int16_t sample = (int16_t)filtered_sample;
+            if (filtered_sample > 32767.0f) sample = 32767;
+            else if (filtered_sample < -32768.0f) sample = -32768;
+
             samples[i] = sample;     // Left channel
             samples[i + 1] = sample; // Right channel
         }
@@ -1195,9 +1251,14 @@ static void a2dp_cleanup_melody(void) {
         mcp_free(a2dp_melody_notes);
         a2dp_melody_notes = NULL;
     }
+    if (a2dp_previous_note) {
+        mcp_free(a2dp_previous_note);
+        a2dp_previous_note = NULL;
+    }
     a2dp_melody_count = 0;
     a2dp_current_note_index = 0;
     a2dp_melody_playing = false;
+    a2dp_crossfade_samples = 0;
 }
 
 // Start melody playback
@@ -1237,7 +1298,7 @@ int32_t bluetooth_start_a2dp_streaming(wasm_exec_env_t exec_env) {
     
     // Reset phases for clean start
     for (int i = 0; i < MAX_CHORD_NOTES; i++) {
-        a2dp_phases[i] = 0.0f;
+        a2dp_phases_current[i] = 0.0f;
     }
     
     // Register A2DP source data callback
