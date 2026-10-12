@@ -27,7 +27,7 @@ ESP32 firmware ── HTTP server ── route → WASM module (from SD card)
 
 ### Why WASM?
 
-- **Sandboxed** — modules can only touch hardware through the host functions you expose, and protected GPIO pins are blocked by the host.
+- **Sandboxed** — modules can only touch hardware through the host functions you expose, and every pin access is checked by the host against protected and firmware-reserved pins.
 - **Swappable** — change device behavior by replacing a file, not reflashing firmware.
 - **Portable** — the module/SDK side has no ESP32-specific code; the same approach should carry to other MCUs that can run WAMR.
 
@@ -49,7 +49,7 @@ The proof of concept has been validated end to end on real hardware: an LLM conn
 
 **▶ Demo** (25s; [full-quality video on X](https://x.com/JustinEchterna9/status/1953216880367288817), or [download the .mp4](docs/media/led-demo-lmstudio.mp4?raw=true)): [LM Studio](https://lmstudio.ai) running the open-weight `openai/gpt-oss-20b` model locally, connected to the ESP32 as an MCP server. Asked to *"turn the led on gpio 5 on and off five times"*, the model issues ten `control_led` tool calls and the LED on the breadboard blinks in step. No cloud LLM involved.
 
-The `led_controller` module exposes `control_led`, `toggle_led`, `get_led_status` and `get_system_info`. The LLM decides which pins to switch and when; the host refuses any pin listed as protected in `cfg.jsn`.
+The `led_controller` module exposes `control_led`, `toggle_led`, `get_led_status` and `get_system_info`. The LLM decides which pins to switch and when; the host refuses protected and firmware-reserved pins (see [Pin safety](#pin-safety)).
 
 <br clear="right">
 
@@ -167,19 +167,37 @@ The device's IP is printed in the serial log.
 
 ### 4. Talk to it
 
-```bash
-curl -X POST http://<esp32-ip>/mcp/led \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
+Each module is an MCP server, so a client has to do the MCP handshake before calling tools:
 
-curl -X POST http://<esp32-ip>/mcp/led \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"control_led","arguments":{"pin":5,"state":1}},"id":2}'
+```bash
+ESP=http://<esp32-ip>/mcp/led
+
+# 1. Handshake
+curl -X POST $ESP -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}},"id":1}'
+curl -X POST $ESP -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+
+# 2. Discover and call tools
+curl -X POST $ESP -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":2}'
+curl -X POST $ESP -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"control_led","arguments":{"pin":5,"state":1}},"id":3}'
 ```
 
-Or point any MCP client that supports HTTP transport at the route.
+Or point any MCP client that supports HTTP transport (e.g. LM Studio) at the route; it does the handshake for you.
 
-Supported MCP methods: `initialize`, `initialized`, `tools/list`, `tools/call`, `ping`.
+Supported MCP methods: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`.
+
+### Pin safety
+
+Every host function that touches a pin (GPIO, PWM, I2S) goes through one check in the firmware. A module can never drive a pin that is:
+
+- wired to the SPI flash (GPIO 6–11) or not a valid GPIO
+- in use by the firmware itself — UART0 console (1, 3), PSRAM (16, 17), the SD card bus (SPI: 5, 18, 19, 23 or SDMMC: 2, 14, 15 — whichever mode mounted), and I2S (25, 26, 27) once audio is started
+- listed in `protected_pins` in `cfg.jsn`
+
+Input-only pins (34–39, plus `input_only_pins`) can't be driven as outputs, and pins in `max_current_pins` are switched to the weakest drive strength. Reserved pins are logged at boot. If `cfg.jsn` is missing a key, the built-in defaults stay in force.
 
 ## Status
 

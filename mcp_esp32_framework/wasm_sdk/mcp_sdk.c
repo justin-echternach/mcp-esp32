@@ -26,6 +26,37 @@ static int g_tool_count = 0;
 static mcp_state_t g_mcp_state = MCP_STATE_UNINITIALIZED;
 static int32_t g_current_request_id = 0;  // Store current JSON-RPC request ID
 
+// Escape text for use inside a JSON string literal. Always NUL-terminates
+// (truncating if needed). Tool results, descriptions and error messages are
+// plain text, so they must go through this before being placed in "...".
+static void json_escape(const char* in, char* out, int32_t out_size) {
+    static const char hex[] = "0123456789abcdef";
+    int32_t o = 0;
+    if (out_size <= 0) return;
+    for (; in && *in; in++) {
+        unsigned char c = (unsigned char)*in;
+        char esc[6];
+        int32_t n = 0;
+        if (c == '"' || c == '\\') {
+            esc[n++] = '\\'; esc[n++] = (char)c;
+        } else if (c == '\n') {
+            esc[n++] = '\\'; esc[n++] = 'n';
+        } else if (c == '\r') {
+            esc[n++] = '\\'; esc[n++] = 'r';
+        } else if (c == '\t') {
+            esc[n++] = '\\'; esc[n++] = 't';
+        } else if (c < 0x20) {
+            esc[n++] = '\\'; esc[n++] = 'u'; esc[n++] = '0'; esc[n++] = '0';
+            esc[n++] = hex[c >> 4]; esc[n++] = hex[c & 0xf];
+        } else {
+            esc[n++] = (char)c;
+        }
+        if (o + n >= out_size) break;
+        for (int32_t k = 0; k < n; k++) out[o++] = esc[k];
+    }
+    out[o] = '\0';
+}
+
 // Buffer allocation helpers for dynamic memory management
 static char* alloc_mcp_buffer(unsigned long size, const char* name) {
     char* buffer = malloc(size);
@@ -336,6 +367,9 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
     pos = written;
     
     for (int i = 0; i < g_tool_count; i++) {
+        char description[MCP_MAX_DESCRIPTION * 2];
+        json_escape(g_tools[i].description, description, sizeof(description));
+
         // Build tool JSON directly into response buffer
         written = snprintf(tools_result + pos, sizeof(tools_result) - pos,
             "%s{\"name\":\"%s\",\"title\":\"%s\",\"description\":\"%s\","
@@ -343,10 +377,10 @@ static int32_t handle_tools_list(char* response, int32_t max_len) {
             i > 0 ? "," : "", 
             g_tools[i].name, 
             g_tools[i].name, 
-            g_tools[i].description,
-            g_tools[i].input_schema);
+            description,
+            g_tools[i].input_schema[0] ? g_tools[i].input_schema : "{\"type\":\"object\"}");
         
-        if (written < 0 || written >= max_len - pos) {
+        if (written < 0 || written >= (int)sizeof(tools_result) - pos) {
             return create_jsonrpc_error(-32000, "Tool list too large for buffer", response, max_len);
         }
         pos += written;
@@ -425,20 +459,24 @@ static int32_t handle_tools_call(const char* params, char* response, int32_t max
                 // Send SSE event for successful tool execution
                 sse_send_tool_result(tool_name, result.data);
                 
-                // Format response according to MCP spec
-                char mcp_result[1024];
+                // Format response according to MCP spec (result.data is plain text)
+                char text[sizeof(result.data) * 2];
+                json_escape(result.data, text, sizeof(text));
+                char mcp_result[1280];
                 snprintf(mcp_result, sizeof(mcp_result),
                     "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],\"isError\":false}",
-                    result.data);
+                    text);
                 int32_t response_result = create_jsonrpc_response(mcp_result, response, max_len);
                 free_mcp_buffer(tool_params);
                 return response_result;
             } else {
                 // Format error response according to MCP spec
-                char mcp_error[512];
+                char text[sizeof(result.message) * 2];
+                json_escape(result.message, text, sizeof(text));
+                char mcp_error[640];
                 snprintf(mcp_error, sizeof(mcp_error),
                     "{\"content\":[{\"type\":\"text\",\"text\":\"%s\"}],\"isError\":true}",
-                    result.message);
+                    text);
                 int32_t response_result = create_jsonrpc_response(mcp_error, response, max_len);
                 free_mcp_buffer(tool_params);
                 return response_result;
@@ -456,6 +494,7 @@ mcp_result_t mcp_success(const char* data) {
     result.code = 0;
     strcpy(result.message, "Success");
     strncpy(result.data, data ? data : "{}", sizeof(result.data) - 1);
+    result.data[sizeof(result.data) - 1] = '\0';
     return result;
 }
 
@@ -464,6 +503,7 @@ mcp_result_t mcp_error(int32_t code, const char* message) {
     mcp_result_t result;
     result.code = code;
     strncpy(result.message, message ? message : "Unknown error", sizeof(result.message) - 1);
+    result.message[sizeof(result.message) - 1] = '\0';
     strcpy(result.data, "null");
     return result;
 }
@@ -600,9 +640,11 @@ static int32_t create_jsonrpc_response(const char* result, char* response, int32
 
 // Create JSON-RPC error with correct ID
 static int32_t create_jsonrpc_error(int32_t code, const char* message, char* response, int32_t max_len) {
+    char escaped[256];
+    json_escape(message, escaped, sizeof(escaped));
     int len = snprintf(response, max_len,
         "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":%d,\"message\":\"%s\"},\"id\":%d}",
-        code, message, g_current_request_id);
+        code, escaped, g_current_request_id);
     return len < max_len ? 0 : -2;
 }
 

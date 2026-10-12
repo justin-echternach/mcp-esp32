@@ -847,41 +847,11 @@ static mcp_result_t bluetooth_scan_handler(const char* params) {
     
     log_info("MUSIC", "[WASM] Scan complete");
     
-    // Escape JSON in-place by shifting characters to make room for backslashes
-    // Work backwards to avoid overwriting unprocessed characters
-    int original_len = strlen(scan_buffer);
-    int quote_count = 0;
-    
-    // Count quotes to know final size
-    for (int i = 0; i < original_len; i++) {
-        if (scan_buffer[i] == '"') quote_count++;
-    }
-    
-    int final_len = original_len + quote_count;
-    if (final_len >= 1024) {
-        log_error("MUSIC", "[WASM] Escaped JSON too large");
-        free(scan_buffer);
-        return mcp_error(-1, "Scan results too large");
-    }
-    
-    // Work backwards to escape in-place
-    scan_buffer[final_len] = '\0';
-    int src = original_len - 1;
-    int dst = final_len - 1;
-    
-    while (src >= 0) {
-        if (scan_buffer[src] == '"') {
-            scan_buffer[dst--] = '"';
-            scan_buffer[dst--] = '\\';
-        } else {
-            scan_buffer[dst--] = scan_buffer[src];
-        }
-        src--;
-    }
-    
-    // Return the escaped scan results
-    // The buffer will be freed by the MCP framework after response is sent
-    return mcp_success(scan_buffer);
+    // The SDK JSON-escapes tool results, so return the scan text as-is.
+    // mcp_success copies the text, so the buffer can be freed right away.
+    mcp_result_t scan_result = mcp_success(scan_buffer);
+    free(scan_buffer);
+    return scan_result;
 }
 
 // Bluetooth connect handler

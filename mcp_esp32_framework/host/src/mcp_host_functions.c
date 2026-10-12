@@ -1,4 +1,5 @@
 #include "mcp_host_functions.h"
+#include "sdkconfig.h"
 #include "mcp_memory.h"
 #include "mcp_config_loader.h"
 #include "mcp_session_manager.h"
@@ -182,7 +183,17 @@ int32_t mcp_native_strcat(wasm_exec_env_t exec_env, char *dest, const char *src)
         return 0;
     }
 
-    strcat(dest, src);
+    // "$$" only proves dest is a valid string where it is now - make sure the
+    // appended bytes (plus NUL) also land inside the module's linear memory
+    size_t dest_len = strlen(dest);
+    size_t src_len = strlen(src);
+    if (!wasm_runtime_validate_native_addr(module_inst, dest + dest_len, (uint64_t)src_len + 1))
+    {
+        ESP_LOGE(TAG, "strcat: write of %u bytes would leave module memory", (unsigned)(src_len + 1));
+        return 0;
+    }
+
+    memcpy(dest + dest_len, src, src_len + 1);
 
     // Convert host pointer back to WASM address
     uint32_t wasm_addr = wasm_runtime_addr_native_to_app(module_inst, dest);
@@ -328,26 +339,131 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env)
     return (int32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
 }
 
+// ========== Pin Access Policy ==========
+//
+// Every host function that touches a pin goes through host_pin_check(). WASM modules
+// can never drive a pin that is:
+//   - not a valid GPIO, or wired to the SPI flash (GPIO 6-11)
+//   - reserved by the firmware itself: UART0 console, PSRAM, and whatever peripherals
+//     are actually in use (SD card bus, I2S) - see mcp_host_reserve_pins()
+//   - listed in "protected_pins" in cfg.jsn
+// and can never drive an input-only pin as an output (GPIO 34-39, plus "input_only_pins").
+// Pins in "max_current_pins" are allowed but switched to the weakest drive strength.
+
+typedef enum
+{
+    PIN_READ,   // read the level
+    PIN_INPUT,  // reconfigure as an input
+    PIN_OUTPUT, // drive the pin
+} pin_access_t;
+
+#if CONFIG_SPIRAM
+// ESP32-WROVER modules wire PSRAM to GPIO16 (CS) and GPIO17 (CLK)
+#define BOOT_RESERVED_PSRAM ((1ULL << 16) | (1ULL << 17))
+#else
+#define BOOT_RESERVED_PSRAM 0
+#endif
+
+// GPIO1/GPIO3 are the UART0 console (logs, flashing)
+static uint64_t s_reserved_pins = (1ULL << 1) | (1ULL << 3) | BOOT_RESERVED_PSRAM;
+static portMUX_TYPE s_pin_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static bool pin_in_list(int pin, const int *list, int count)
+{
+    for (int i = 0; i < count; i++)
+    {
+        if (list[i] == pin)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void mcp_host_reserve_pins(const int *pins, int count, const char *owner)
+{
+    taskENTER_CRITICAL(&s_pin_lock);
+    for (int i = 0; i < count; i++)
+    {
+        if (pins[i] >= 0 && pins[i] < 64)
+        {
+            s_reserved_pins |= (1ULL << pins[i]);
+        }
+    }
+    taskEXIT_CRITICAL(&s_pin_lock);
+
+    for (int i = 0; i < count; i++)
+    {
+        ESP_LOGI(TAG, "GPIO %d reserved for %s", pins[i], owner);
+    }
+}
+
+void mcp_host_release_pins(const int *pins, int count)
+{
+    taskENTER_CRITICAL(&s_pin_lock);
+    for (int i = 0; i < count; i++)
+    {
+        if (pins[i] >= 0 && pins[i] < 64)
+        {
+            s_reserved_pins &= ~(1ULL << pins[i]);
+        }
+    }
+    taskEXIT_CRITICAL(&s_pin_lock);
+}
+
+// Returns true if the access is allowed. Logs the reason when denied unless op is NULL.
+static bool host_pin_check(int32_t pin, pin_access_t access, const char *op)
+{
+    const char *reason = NULL;
+    const gpio_protection_config_t *prot = &g_mcp_config.gpio_protection;
+
+    if (!GPIO_IS_VALID_GPIO(pin))
+    {
+        reason = "not a valid GPIO";
+    }
+    else if (pin >= 6 && pin <= 11)
+    {
+        reason = "wired to SPI flash";
+    }
+    else if (pin_in_list(pin, prot->protected_pins, prot->protected_pin_count))
+    {
+        reason = "protected in config";
+    }
+    else if (access != PIN_READ && (s_reserved_pins & (1ULL << pin)))
+    {
+        reason = "in use by firmware";
+    }
+    else if (access == PIN_OUTPUT &&
+             (!GPIO_IS_VALID_OUTPUT_GPIO(pin) ||
+              pin_in_list(pin, prot->input_only_pins, prot->input_only_pin_count)))
+    {
+        reason = "input-only pin";
+    }
+
+    if (reason && op)
+    {
+        ESP_LOGW(TAG, "%s: GPIO %ld denied (%s)", op, (long)pin, reason);
+    }
+    return reason == NULL;
+}
+
+// Limit drive strength on pins flagged as high-current risks
+static void host_pin_apply_current_limit(int32_t pin)
+{
+    const gpio_protection_config_t *prot = &g_mcp_config.gpio_protection;
+    if (pin_in_list(pin, prot->max_current_pins, prot->max_current_pin_count))
+    {
+        gpio_set_drive_capability((gpio_num_t)pin, GPIO_DRIVE_CAP_0);
+    }
+}
+
 // ========== GPIO Functions (ESP32-specific) ==========
 
 int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level)
 {
-    // Check if pin is protected
-    if (pin >= 0 && pin < 40)
+    if (!host_pin_check(pin, PIN_OUTPUT, "gpio_set_level"))
     {
-        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++)
-        {
-            if (g_mcp_config.gpio_protection.protected_pins[i] == pin)
-            {
-                ESP_LOGW(TAG, "GPIO pin %d is protected, access denied", pin);
-                return -1; // Protected pin
-            }
-        }
-    }
-
-    if (pin < 0 || pin >= 40)
-    {
-        return -1; // Invalid pin
+        return -1;
     }
 
     esp_err_t result = gpio_set_level((gpio_num_t)pin, level);
@@ -356,9 +472,9 @@ int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t lev
 
 int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
 {
-    if (pin < 0 || pin >= 40)
+    if (!host_pin_check(pin, PIN_READ, "gpio_get_level"))
     {
-        return -1; // Invalid pin
+        return -1;
     }
 
     return gpio_get_level((gpio_num_t)pin);
@@ -366,24 +482,6 @@ int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin)
 
 int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction)
 {
-    // Check if pin is protected
-    if (pin >= 0 && pin < 40)
-    {
-        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++)
-        {
-            if (g_mcp_config.gpio_protection.protected_pins[i] == pin)
-            {
-                ESP_LOGW(TAG, "GPIO pin %d is protected, direction change denied", pin);
-                return -1;
-            }
-        }
-    }
-
-    if (pin < 0 || pin >= 40)
-    {
-        return -1; // Invalid pin
-    }
-
     gpio_mode_t mode;
     switch (direction)
     {
@@ -400,20 +498,23 @@ int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t
         return -1; // Invalid direction
     }
 
+    if (!host_pin_check(pin, mode == GPIO_MODE_INPUT ? PIN_INPUT : PIN_OUTPUT, "gpio_set_direction"))
+    {
+        return -1;
+    }
+
     esp_err_t result = gpio_set_direction((gpio_num_t)pin, mode);
+    if (result == ESP_OK && mode != GPIO_MODE_INPUT)
+    {
+        host_pin_apply_current_limit(pin);
+    }
     return (result == ESP_OK) ? 0 : -1;
 }
 
+// Lets a module ask before trying; enforcement happens in the functions above regardless
 int32_t native_gpio_is_pin_protected(wasm_exec_env_t exec_env, int32_t pin)
 {
-    for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++)
-    {
-        if (g_mcp_config.gpio_protection.protected_pins[i] == pin)
-        {
-            return 1; // Protected
-        }
-    }
-    return 0; // Not protected
+    return host_pin_check(pin, PIN_OUTPUT, NULL) ? 0 : 1;
 }
 
 // ========== PWM Functions (LEDC-based for Music/Speaker Control) ==========
@@ -442,17 +543,9 @@ int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency
         return -2;
     }
 
-    // Check if pin is protected
-    if (pin >= 0 && pin < 40)
+    if (!host_pin_check(pin, PIN_OUTPUT, "pwm_init"))
     {
-        for (int i = 0; i < g_mcp_config.gpio_protection.protected_pin_count; i++)
-        {
-            if (g_mcp_config.gpio_protection.protected_pins[i] == pin)
-            {
-                ESP_LOGW(TAG, "PWM: Pin %d is protected, access denied", pin);
-                return -3;
-            }
-        }
+        return -3;
     }
 
     esp_err_t err;
@@ -488,6 +581,7 @@ int32_t native_pwm_init(wasm_exec_env_t exec_env, int32_t pin, int32_t frequency
         return -5;
     }
 
+    host_pin_apply_current_limit(pin);
     pwm_initialized = true;
     pwm_current_pin = pin;
 
@@ -630,6 +724,49 @@ int32_t native_sse_send_event(wasm_exec_env_t exec_env, const char *event_type, 
     }
 }
 
+// Escape a string for use inside a JSON string literal. Always NUL-terminates;
+// returns false if the output was truncated.
+static bool json_escape(const char *in, char *out, size_t out_size)
+{
+    size_t o = 0;
+    for (; *in; in++)
+    {
+        unsigned char c = (unsigned char)*in;
+        char esc[7];
+        size_t n;
+        if (c == '"' || c == '\\')
+        {
+            esc[0] = '\\';
+            esc[1] = (char)c;
+            n = 2;
+        }
+        else if (c == '\n' || c == '\r' || c == '\t')
+        {
+            esc[0] = '\\';
+            esc[1] = c == '\n' ? 'n' : (c == '\r' ? 'r' : 't');
+            n = 2;
+        }
+        else if (c < 0x20)
+        {
+            n = (size_t)snprintf(esc, sizeof(esc), "\\u%04x", c);
+        }
+        else
+        {
+            esc[0] = (char)c;
+            n = 1;
+        }
+        if (o + n >= out_size)
+        {
+            out[o] = '\0';
+            return false;
+        }
+        memcpy(out + o, esc, n);
+        o += n;
+    }
+    out[o] = '\0';
+    return true;
+}
+
 int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char *tool_name, const char *result)
 {
     if (!tool_name || !result)
@@ -638,9 +775,15 @@ int32_t native_sse_send_tool_result(wasm_exec_env_t exec_env, const char *tool_n
         return -1;
     }
 
-    // Create JSON-formatted tool result
+    // Create JSON-formatted tool result. Both values are module-supplied text, so
+    // escape them rather than splicing them into the JSON raw.
+    char tool_esc[96];
+    char result_esc[384];
+    json_escape(tool_name, tool_esc, sizeof(tool_esc));
+    json_escape(result, result_esc, sizeof(result_esc));
+
     char event_data[512];
-    int len = snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":%s}", tool_name, result);
+    int len = snprintf(event_data, sizeof(event_data), "{\"tool\":\"%s\",\"result\":\"%s\"}", tool_esc, result_esc);
 
     if (len >= sizeof(event_data))
     {
@@ -678,8 +821,15 @@ int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char *json_str
     ESP_LOGD(TAG, "JSON_PARSE: Called with json=%p, method=%p, params=%p, max_len=%d", json_str, method_out, params_out, max_len);
     wasm_module_inst_t module_inst = wasm_runtime_get_module_inst(exec_env);
 
-    // Since we're using automatic conversion ($**i), the pointers are already native pointers
-    // No validation needed - just direct access
+    // "*" arguments are only checked by WAMR for a single byte. Validate the full
+    // extent of both output buffers before writing anything into them.
+    if (!method_out || !params_out || max_len < 5 ||
+        !wasm_runtime_validate_native_addr(module_inst, method_out, 64) ||
+        !wasm_runtime_validate_native_addr(module_inst, params_out, (uint64_t)max_len))
+    {
+        ESP_LOGE(TAG, "JSON_PARSE: output buffers outside module memory (max_len=%ld)", (long)max_len);
+        return -1;
+    }
 
     ESP_LOGD(TAG, "JSON_PARSE: All validations passed, JSON content: '%.50s'", json_str);
 
@@ -745,20 +895,19 @@ int32_t native_json_parse_request(wasm_exec_env_t exec_env, const char *json_str
                 if (!in_string && brace_depth == 0 && (c == ']' || c == '"' || (c >= '0' && c <= '9')))
                 {
                     // End of simple value
-                    i++;
                     break;
                 }
             }
-            params_out[i] = '\0';
+            params_out[i] = '\0'; // i <= max_len - 1
         }
         else
         {
-            strcpy(params_out, "null");
+            snprintf(params_out, max_len, "null");
         }
     }
     else
     {
-        strcpy(params_out, "null");
+        snprintf(params_out, max_len, "null");
     }
 
     return 0;
@@ -1072,6 +1221,7 @@ static TaskHandle_t i2s_task_handle = NULL;
 #define I2S_BCK_PIN 27  // Bit Clock
 #define I2S_WS_PIN 26   // Word Select (LRC)
 #define I2S_DATA_PIN 25 // Data Input (DIN)
+static const int i2s_pins[] = {I2S_BCK_PIN, I2S_WS_PIN, I2S_DATA_PIN};
 
 // Audio generation parameters
 #define I2S_SAMPLE_BUFFER_SIZE 64  // Increased from 16 for smoother playback
@@ -1879,6 +2029,14 @@ int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t b
         return -2;
     }
 
+    for (int i = 0; i < 3; i++)
+    {
+        if (!host_pin_check(i2s_pins[i], PIN_OUTPUT, "i2s_init"))
+        {
+            return -7; // I2S pin not available
+        }
+    }
+
     // Initialize sine table
     esp_err_t ret = init_sine_table();
     if (ret != ESP_OK)
@@ -1945,6 +2103,7 @@ int32_t native_i2s_init(wasm_exec_env_t exec_env, int32_t sample_rate, int32_t b
     i2s_bits_per_sample = bits_per_sample;
     i2s_initialized = true;
     i2s_playing = false;
+    mcp_host_reserve_pins(i2s_pins, 3, "I2S audio");
 
     // Stop I2S immediately after initialization to prevent continuous clock
     // It will be started when actually playing audio
@@ -2028,6 +2187,7 @@ int32_t native_i2s_deinit(wasm_exec_env_t exec_env)
     }
 
     i2s_initialized = false;
+    mcp_host_release_pins(i2s_pins, 3);
     ESP_LOGI(TAG, "I2S deinitialized");
 
     return 0;

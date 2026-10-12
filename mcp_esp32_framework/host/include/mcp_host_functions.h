@@ -165,6 +165,13 @@ int32_t mcp_native_get_tick_count(wasm_exec_env_t exec_env);
  * @param level Level to set (0 or 1)
  * @return 0 on success, -1 on error
  */
+/**
+ * @brief Mark pins as in use by the firmware (SD card bus, I2S, ...) so WASM
+ * modules can never drive or reconfigure them. Logged per pin with the owner.
+ */
+void mcp_host_reserve_pins(const int* pins, int count, const char* owner);
+void mcp_host_release_pins(const int* pins, int count);
+
 int32_t native_gpio_set_level(wasm_exec_env_t exec_env, int32_t pin, int32_t level);
 int32_t native_gpio_get_level(wasm_exec_env_t exec_env, int32_t pin);
 int32_t native_gpio_set_direction(wasm_exec_env_t exec_env, int32_t pin, int32_t direction);

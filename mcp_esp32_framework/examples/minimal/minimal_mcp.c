@@ -69,16 +69,19 @@ void _start() {
     // Tool 1: hello
     strcpy(tools[0].name, "hello");
     strcpy(tools[0].description, "Say hello with an optional name");
+    strcpy(tools[0].input_schema, "{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\",\"description\":\"Who to greet (default: World)\"}}}");
     tools[0].handler = hello_handler;
     
     // Tool 2: echo
     strcpy(tools[1].name, "echo");
     strcpy(tools[1].description, "Echo back a message");
+    strcpy(tools[1].input_schema, "{\"type\":\"object\",\"properties\":{\"message\":{\"type\":\"string\",\"description\":\"Text to echo back\"}},\"required\":[\"message\"]}");
     tools[1].handler = echo_handler;
     
     // Tool 3: add
     strcpy(tools[2].name, "add");
     strcpy(tools[2].description, "Add two numbers");
+    strcpy(tools[2].input_schema, "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},\"required\":[\"a\",\"b\"]}");
     tools[2].handler = add_handler;
     
     // Register all tools

@@ -1,6 +1,7 @@
 #include "mcp_wasm_runtime.h"
 #include "mcp_memory.h"
 #include "mcp_config.h"
+#include "mcp_host_functions.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include <stdio.h>
@@ -61,6 +62,8 @@ bool mcp_wasm_mount_sd_card(void) {
     ret = esp_vfs_fat_sdspi_mount("/sdcard", &host, &slot_config, &mount_config, &card);
     
     if (ret == ESP_OK) {
+        static const int sd_spi_pins[] = {5, 18, 19, 23};  // CS, SCLK, MISO, MOSI
+        mcp_host_reserve_pins(sd_spi_pins, 4, "SD card (SPI)");
         ESP_LOGI(TAG, "✅ SD card mounted successfully via SPI");
         ESP_LOGI(TAG, "SD card info: Name: %s, Type: %s, Capacity: %lluMB", 
                 card->cid.name, 
@@ -94,6 +97,8 @@ bool mcp_wasm_mount_sd_card(void) {
     ret = esp_vfs_fat_sdmmc_mount("/sdcard", &sdmmc_host, &sdmmc_slot_config, &mount_config, &card);
     
     if (ret == ESP_OK) {
+        static const int sd_mmc_pins[] = {14, 15, 2};  // CLK, CMD, D0
+        mcp_host_reserve_pins(sd_mmc_pins, 3, "SD card (SDMMC)");
         ESP_LOGI(TAG, "✅ SD card mounted successfully via SDMMC fallback");
         ESP_LOGI(TAG, "SD card info: Name: %s, Type: %s, Capacity: %lluMB", 
                 card->cid.name, 

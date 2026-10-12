@@ -86,12 +86,17 @@ int mcp_json_parse_int_array(const char* json, const char* key, int* array, int 
     }
     
     char search_key[128];
-    snprintf(search_key, sizeof(search_key), "\"%s\":[", key);
+    snprintf(search_key, sizeof(search_key), "\"%s\"", key);
     
     const char* array_start = strstr(json, search_key);
     if (!array_start) return 0;
     
+    // Accept any whitespace around the ':' and before the '['
     array_start += strlen(search_key);
+    while (*array_start == ' ' || *array_start == '\t' || *array_start == '\r' || *array_start == '\n') array_start++;
+    if (*array_start++ != ':') return 0;
+    while (*array_start == ' ' || *array_start == '\t' || *array_start == '\r' || *array_start == '\n') array_start++;
+    if (*array_start++ != '[') return 0;
     const char* array_end = strchr(array_start, ']');
     if (!array_end) return 0;
     
@@ -168,24 +173,30 @@ bool mcp_config_load_from_json(mcp_config_t* config, const char* json_string) {
         return false;
     }
     
-    // Parse GPIO protection settings
-    config->gpio_protection.protected_pin_count = mcp_json_parse_int_array(
-        json_string, "protected_pins", 
-        config->gpio_protection.protected_pins, 
-        MAX_PROTECTED_PINS
-    );
-    
-    config->gpio_protection.input_only_pin_count = mcp_json_parse_int_array(
-        json_string, "input_only_pins",
-        config->gpio_protection.input_only_pins,
-        MAX_PROTECTED_PINS
-    );
-    
-    config->gpio_protection.max_current_pin_count = mcp_json_parse_int_array(
-        json_string, "max_current_pins",
-        config->gpio_protection.max_current_pins,
-        MAX_PROTECTED_PINS
-    );
+    // Parse GPIO protection settings. Parse into scratch arrays and only replace the
+    // defaults when the key is present, so a missing or malformed key fails closed.
+    int pins[MAX_PROTECTED_PINS];
+    int count;
+
+    count = mcp_json_parse_int_array(json_string, "protected_pins", pins, MAX_PROTECTED_PINS);
+    if (count > 0) {
+        memcpy(config->gpio_protection.protected_pins, pins, count * sizeof(int));
+        config->gpio_protection.protected_pin_count = count;
+    } else {
+        ESP_LOGW(TAG, "protected_pins missing or empty in config - keeping defaults");
+    }
+
+    count = mcp_json_parse_int_array(json_string, "input_only_pins", pins, MAX_PROTECTED_PINS);
+    if (count > 0) {
+        memcpy(config->gpio_protection.input_only_pins, pins, count * sizeof(int));
+        config->gpio_protection.input_only_pin_count = count;
+    }
+
+    count = mcp_json_parse_int_array(json_string, "max_current_pins", pins, MAX_PROTECTED_PINS);
+    if (count > 0) {
+        memcpy(config->gpio_protection.max_current_pins, pins, count * sizeof(int));
+        config->gpio_protection.max_current_pin_count = count;
+    }
     
     // Parse system settings
     mcp_json_find_int(json_string, "max_wasm_modules", &config->system.max_wasm_modules);
