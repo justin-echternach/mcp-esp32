@@ -48,8 +48,10 @@
 static const char *TAG = "mcp-wamr";
 
 // WiFi Configuration
-#define WIFI_SSID      "your-ssid"
-#define WIFI_PASS      "your-password"
+// WIFI_SSID / WIFI_PASS come from .env at the project root (see .env.example)
+#if !defined(WIFI_SSID) || !defined(WIFI_PASS)
+#error "WIFI_SSID / WIFI_PASS not set - copy .env.example to .env"
+#endif
 #define WIFI_MAXIMUM_RETRY  5
 
 // HTTP Server globals
