@@ -31,6 +31,38 @@ ESP32 firmware ── HTTP server ── route → WASM module (from SD card)
 - **Swappable** — change device behavior by replacing a file, not reflashing firmware.
 - **Portable** — the module/SDK side has no ESP32-specific code; the same approach should carry to other MCUs that can run WAMR.
 
+## Demo
+
+The proof of concept has been validated end to end on real hardware: an LLM connected over MCP discovers the device's tools, then blinks LEDs and **composes music on its own and plays it through a Bluetooth speaker** — all driven by WASM modules loaded from the SD card.
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/esp32-wrover-e.jpg" width="260" alt="ESP32-WROVER-E dev board"><br><sub>ESP32-WROVER-E (4MB PSRAM) running the MCP host + WAMR</sub></td>
+    <td align="center"><img src="docs/images/rgb-led-module.jpg" width="260" alt="8 RGB LED module"><br><sub>8-LED module driven through GPIO host functions</sub></td>
+    <td align="center"><img src="docs/images/i2s-amp.jpg" width="260" alt="I2S DAC and PAM8403 amplifier"><br><sub>I2S DAC + PAM8403 amp for local audio (Bluetooth A2DP also supported)</sub></td>
+  </tr>
+</table>
+
+### LED control
+
+The `led_controller` module exposes `control_led`, `toggle_led`, `get_led_status` and `get_system_info`. The LLM decides which pins to switch and when; the host refuses any pin listed as protected in `cfg.jsn`.
+
+### LLM-generated music over Bluetooth
+
+The `music_player` module exposes Bluetooth and playback tools. A typical session, entirely driven by the LLM:
+
+1. `bluetooth_init` → `bluetooth_scan` — find nearby speakers
+2. `bluetooth_connect` with the speaker's MAC address
+3. `play_melody` with a melody the LLM writes itself, including chords:
+
+```json
+{"name": "play_melody",
+ "arguments": {"melody": "C4:400,E4:400,G4:400,[C4,E4,G4]:800,A4:400,[F4,A4,C5]:800",
+               "output": "bluetooth", "volume": 60}}
+```
+
+The WASM module parses the note string and calls host functions; the host synthesizes the audio and streams it to the speaker over A2DP. `stop_music` ends playback.
+
 ## What's in the repo
 
 ```
